@@ -1,0 +1,24 @@
+{
+  "name": "mini-claude-code",
+  "version": "0.1.0",
+  "description": "로컬 LLM 기반 미니 에이전트형 코딩 도구",
+  "type": "module",
+  "bin": {
+    "mcc": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "openai": "^4.77.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "playwright": "^1.61.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

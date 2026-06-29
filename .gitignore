@@ -1,0 +1,22 @@
+# 의존성 / 빌드 산출물
+node_modules/
+dist/
+
+# 에이전트 작업 산출물 / 테스트 잔여물
+workspace/
+PROGRESS.md
+hello.py
+
+# 백업 / 임시
+*.bak
+*.tmp
+_*/
+.DS_Store
+
+# 로컬 환경
+.env
+.env.local
+
+# 에디터 / 테스트 잔여물
+.vscode/
+src/*.py

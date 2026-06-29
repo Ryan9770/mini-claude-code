@@ -1,0 +1,27 @@
+# mini-claude-code 격리 실행 (docker compose run --rm mcc)
+# 대화형 CLI이므로 반드시 `run`(또는 -it)으로 실행한다. `up`은 TTY가 없어 부적합.
+services:
+  mcc:
+    build: .
+    image: mini-claude-code
+    stdin_open: true   # -i
+    tty: true          # -t
+    environment:
+      # 추론 서버 주소로 교체 (컨테이너에서 도달 가능한 IP/호스트).
+      # 같은 호스트의 서버면 host.docker.internal, 원격이면 그 LAN IP.
+      MCC_BASE_URL: "http://host.docker.internal:8080/v1"
+      MCC_MODEL: "gemma4"
+      MCC_CONTEXT_SIZE : 65536
+    volumes:
+      # 에이전트 작업 결과를 호스트와 공유 (이 폴더만 노출됨)
+      - ./workspace:/work
+      # 스킬·learnings·mcp 설정 영속화 (선택)
+      - ~/.mcc:/home/agent/.mcc
+    # ── 하드닝 (심층 방어) ──
+    cap_drop: ["ALL"]                       # 모든 리눅스 capability 제거
+    security_opt: ["no-new-privileges:true"] # 권한 상승 차단
+    mem_limit: "8g"                          # 메모리 폭주 방지
+    pids_limit: 512                          # 포크 폭탄 완화
+    # read_only 루트FS를 원하면 아래 주석 해제 (단, npm 캐시 등 tmpfs 필요)
+    # read_only: true
+    # tmpfs: ["/tmp", "/home/agent/.npm"]

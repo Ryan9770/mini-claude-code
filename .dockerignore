@@ -1,0 +1,7 @@
+node_modules
+dist
+.git
+*.bak
+_evolve_test
+_t_*.ts
+workspace
