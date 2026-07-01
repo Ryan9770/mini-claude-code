@@ -42,6 +42,15 @@ const client = new OpenAI({ baseURL: config.baseURL, apiKey: config.apiKey });
 
 const shellName = config.shell ? "bash" : process.platform === "win32" ? "cmd.exe" : "sh";
 
+// 현재 시각(시스템 클럭). 모델의 학습 컷오프가 과거라 '지금'을 미래/가상으로 오인하는 것을 막는다.
+const NOW_STR = (() => {
+  try {
+    return new Date().toLocaleString("ko-KR", { dateStyle: "full", timeStyle: "short" });
+  } catch {
+    return new Date().toISOString();
+  }
+})();
+
 // 삽질 방지 핵심 규칙 — 메인/서브에이전트 '모두'가 공유해야 하는 행동 규칙.
 // (서브에이전트는 BASE_SYSTEM_PROMPT가 아니라 자체 role 프롬프트를 쓰므로 별도 주입 필요)
 export const ANTI_FLAIL_RULES = `[삽질 방지 — 반드시 지켜라]
@@ -53,6 +62,10 @@ export const ANTI_FLAIL_RULES = `[삽질 방지 — 반드시 지켜라]
 - 추가 작업이 있는지 물어봐라: 작업 종료 시 추가 작업이 존재하는지 즉시 ask_user 도구로 사용자에게 번호 선택지를 제시해 물어라.`;
 
 export const BASE_SYSTEM_PROMPT = `당신은 로컬에서 동작하는 에이전트형 코딩 어시스턴트다.
+
+[현재 시각 — 매우 중요]
+- 지금은 ${NOW_STR}이다. 네 학습 데이터가 이보다 과거라도, 이 날짜가 '실제 현재'다. 이 시점을 미래·가상으로 취급하지 마라.
+- 뉴스·시세·최근 동향 등 시의성 있는 정보가 필요하면 반드시 web_search/fetch_url로 실제 조회하라. 절대 추측하거나 '가상 시뮬레이션'으로 지어내지 마라(가칭·유사모델 금지).
 
 [행동 원칙]
 - 절대 "~하겠습니다"라고 예고만 하고 턴을 끝내지 마라. 할 일이 있으면 그 즉시 해당 도구를 호출하라.
@@ -142,8 +155,9 @@ export async function runAgent(userInput: string): Promise<string> {
 // 도구 없이 '단발 응답'만 하는 순수 대화. 에이전트와 '분리된' 자체 히스토리를 쓴다.
 const CHAT_SYSTEM_PROMPT =
   "너는 도움이 되는 대화형 어시스턴트다. 한국어로 간결하고 정확하게 답한다. " +
-  "이 모드에서는 파일·명령 등 도구를 쓸 수 없다. 실제 작업(파일 생성·수정·실행·코드베이스 조사)이 " +
-  "필요하면 방법을 설명하고, '에이전트 모드(/agent)에서 실행하라'고 안내하라.";
+  `현재 시각은 ${NOW_STR}이다. 학습 데이터가 과거라도 이 날짜를 실제 현재로 받아들여라(미래·가상 취급 금지). ` +
+  "이 모드에서는 파일·명령·웹검색 등 도구를 쓸 수 없다. 실제 작업이나 최신 정보 조회(뉴스·시세 등)가 " +
+  "필요하면 지어내지 말고, '에이전트 모드(/agent)에서 web_search로 실행하라'고 안내하라.";
 const chatSession = createSession(CHAT_SYSTEM_PROMPT, [], "chat");
 
 // 챗봇 히스토리 리셋
@@ -183,8 +197,9 @@ export async function classifyIntent(userInput: string): Promise<"agent" | "chat
         {
           role: "system",
           content:
-            "다음 사용자 메시지를 분류하라. 파일 읽기/쓰기/수정, 코드 구현, 명령 실행, 프로젝트·코드베이스 조사 등 " +
-            "도구·파일시스템이 필요하면 AGENT. 개념 설명·질문·의견·잡담 등 순수 대화로 충분하면 CHAT. " +
+            "다음 사용자 메시지를 분류하라. 파일 읽기/쓰기/수정, 코드 구현, 명령 실행, 프로젝트·코드베이스 조사가 필요하면 AGENT. " +
+            "또한 웹 검색·자료 조사·최신/시의성 정보가 필요한 요청('검색해', '찾아서', '최신', '뉴스', '시세', '현재 ~는' 등)도 반드시 AGENT. " +
+            "순수하게 개념 설명·의견·잡담으로 끝나면 CHAT. 애매하면 AGENT. " +
             "반드시 AGENT 또는 CHAT 한 단어만 출력하라.",
         },
         { role: "user", content: userInput },
