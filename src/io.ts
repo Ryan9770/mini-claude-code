@@ -5,6 +5,32 @@ import { stdin, stdout } from "node:process";
 
 export const rl = readline.createInterface({ input: stdin, output: stdout });
 
+// ── 작업 중 강제 종료(취소) ──────────────────────────────
+// 한 작업이 도는 동안 현재 AbortController를 보관. Ctrl+C가 이걸 abort하면 작업만 취소된다.
+let aborter: AbortController | null = null;
+
+export function beginAbortable(): AbortSignal {
+  aborter = new AbortController();
+  return aborter.signal;
+}
+export function endAbortable(): void {
+  aborter = null;
+}
+// 진행 중인 작업을 취소. 작업이 있었으면 true.
+export function requestAbort(): boolean {
+  if (aborter && !aborter.signal.aborted) {
+    aborter.abort();
+    return true;
+  }
+  return false;
+}
+export function activeSignal(): AbortSignal | undefined {
+  return aborter?.signal;
+}
+export function isAborted(): boolean {
+  return aborter?.signal.aborted ?? false;
+}
+
 let approveAll = false; // 세션 동안 'a'를 누르면 이후 자동 허용
 
 // 위험한 작업 실행 전 사용자 승인을 받는다.

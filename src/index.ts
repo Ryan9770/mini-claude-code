@@ -5,11 +5,34 @@ import { runAgent, addMainTools } from "./agent.js";
 import { ralphLoop } from "./ralph.js";
 import { buildWithCritic } from "./critic.js";
 import { getSkills, skillsDir } from "./skills.js";
+import { buildIndex, skillLibDir } from "./skill-router.js";
 import { evolve } from "./evolve.js";
 import { initMcp, getMcpTools, mcpServerInfo, closeMcp } from "./mcp.js";
-import { rl } from "./io.js";
+import { rl, beginAbortable, endAbortable, requestAbort } from "./io.js";
+
+let busy = false; // 작업 실행 중인지
+let lastInterrupt = 0; // 동시 중복 SIGINT(같은 Ctrl+C가 rl+process 둘 다 깨우는 것) 무시용
+
+// Ctrl+C: 작업 중이면 그 작업만 취소, 유휴면 종료. (rl과 process 양쪽에 걸어 어느 상태든 잡음)
+function onInterrupt() {
+  const now = Date.now();
+  if (now - lastInterrupt < 400) return; // 한 번의 입력이 두 핸들러를 깨운 경우 1회만 처리
+  lastInterrupt = now;
+  if (busy && requestAbort()) {
+    console.log("\n⛔ 현재 작업을 취소합니다... (잠시 후 프롬프트로 복귀)");
+  } else {
+    rl.close();
+    void closeMcp().finally(() => {
+      console.log("\n종료합니다. 👋");
+      process.exit(0);
+    });
+  }
+}
 
 async function main() {
+  rl.on("SIGINT", onInterrupt);
+  process.on("SIGINT", onInterrupt);
+
   console.log("┌─────────────────────────────────────────┐");
   console.log("│   mini-claude-code (local LLM agent)     │");
   console.log("└─────────────────────────────────────────┘");
@@ -17,13 +40,15 @@ async function main() {
   console.log(`  endpoint: ${config.baseURL}`);
   console.log(`  workdir : ${config.workdir}`);
   console.log(`  skills  : ${getSkills().length}개 로드됨 (${skillsDir()})`);
+  const lib = skillLibDir();
+  if (lib) console.log(`  router  : 라이브러리 ${buildIndex().length}개 스킬 인덱싱됨 → 프롬프트별 동적 선택 (${lib})`);
 
   // MCP 서버 연결 → 도구를 메인 세션에 병합
   const mcp = await initMcp();
   addMainTools(getMcpTools());
   if (mcp.servers) console.log(`  mcp     : ${mcp.servers}개 서버, ${mcp.tools}개 도구`);
 
-  console.log(`  명령: /ralph <목표> | /critic <목표> | /skills | /evolve | /mcp | exit\n`);
+  console.log(`  명령: /ralph | /critic | /skills | /evolve | /mcp | exit  (작업 중 Ctrl+C=취소)\n`);
 
   while (true) {
     let input: string;
@@ -56,8 +81,15 @@ async function main() {
           console.log("사용법: /critic <목표>  (구현→리뷰→수정 루프)");
           continue;
         }
-        console.log("⚠️  자율 루프입니다. 승인 프롬프트에서 'a'를 누르면 끊김 없이 진행됩니다.");
-        await buildWithCritic(goal);
+        console.log("⚠️  자율 루프입니다. 승인 프롬프트에서 'a'를 누르면 끊김 없이 진행됩니다. (Ctrl+C=취소)");
+        busy = true;
+        beginAbortable();
+        try {
+          await buildWithCritic(goal);
+        } finally {
+          busy = false;
+          endAbortable();
+        }
         continue;
       }
       if (input === "/skills") {
@@ -84,11 +116,25 @@ async function main() {
           console.log("사용법: /ralph [최대반복|0=무제한] <목표>  (예: /ralph 0 workspace에 스네이크 게임 완성)");
           continue;
         }
-        console.log("⚠️  자율 루프는 여러 번 파일 변경·명령 실행을 시도합니다. 승인 프롬프트에서 'a'를 누르면 이후 자동 허용됩니다.");
-        await ralphLoop(rest, maxIters);
+        console.log("⚠️  자율 루프는 여러 번 파일 변경·명령 실행을 시도합니다. 승인 프롬프트에서 'a'를 누르면 이후 자동 허용됩니다. (Ctrl+C=취소)");
+        busy = true;
+        beginAbortable();
+        try {
+          await ralphLoop(rest, maxIters);
+        } finally {
+          busy = false;
+          endAbortable();
+        }
         continue;
       }
-      await runAgent(input);
+      busy = true;
+      beginAbortable();
+      try {
+        await runAgent(input);
+      } finally {
+        busy = false;
+        endAbortable();
+      }
     } catch (err: any) {
       console.error(`\n❌ 에러: ${err.message}`);
       console.error(`   로컬 모델 서버(${config.baseURL})가 실행 중인지 확인하세요.\n`);

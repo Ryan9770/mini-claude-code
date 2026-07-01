@@ -1,6 +1,14 @@
 // 로컬 LLM 연결 및 에이전트 설정
 // Ollama / vLLM / LM Studio 모두 OpenAI 호환 엔드포인트를 제공하므로 baseURL만 바꾸면 됩니다.
 import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+// 이 파일(src/ 또는 dist/)의 부모 = mini-claude-code 프로젝트 루트.
+// 스킬·하네스를 홈(~/.mcc)이 아니라 '프로젝트 안'에서 읽기 위한 기준점.
+// cwd는 에이전트 작업 디렉터리(도커선 /work)라 부적합하므로, 코드 위치를 기준으로 삼는다.
+// (dev: src/, 빌드: dist/, 도커: /app/dist — 모두 한 단계 위가 프로젝트 루트)
+const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 // run_command가 사용할 셸 선택.
 // 윈도우 기본 cmd.exe는 bash 문법(mkdir -p, && 등)을 모르고 출력 인코딩(CP949)도 깨지므로,
@@ -38,10 +46,13 @@ export const config = {
   maxSteps: 25,
 
   // 샘플링 파라미터.
-  // temperature는 낮게(도구 호출 안정), frequencyPenalty로 반복 붕괴(같은 토큰 무한반복) 억제.
-  // Q4 모델이 긴 코드를 생성할 때 '<div class<div class...' 같은 루프에 빠지는 걸 막는다.
+  // temperature는 낮게(도구 호출 안정).
+  // frequencyPenalty: 0.4는 정당하게 반복돼야 할 토큰(파일명 등)까지 페널티를 줘서
+  // 'generate_pip_knows.py'가 'generate_pip_know스.final.py'처럼 손상되는 부작용이 관측됨
+  // (→ read_file 난사의 원인). 반복 붕괴는 스트림 내 isLooping 감지기가 별도로 잡으므로
+  // 페널티를 0.2로 낮춘다. MCC_FREQ_PENALTY로 조정 가능.
   temperature: 0.3,
-  frequencyPenalty: 0.4,
+  frequencyPenalty: Number(process.env.MCC_FREQ_PENALTY ?? 0.2),
   presencePenalty: 0.0,
 
   // 한 응답의 최대 출력 토큰. 반복 루프·폭주가 무한정 길어지는 것을 하드 차단.
@@ -49,6 +60,17 @@ export const config = {
 
   // 모델 응답 오류(예: 깨진 tool JSON으로 인한 500) 연속 발생 시 재시도 허용 횟수.
   maxModelRetries: 2,
+
+  // '예고만 하고 멈춤'(도구 없이 다음 단계만 예고)일 때, 즉시 실행하도록 떠밀 최대 횟수.
+  maxNudges: 3,
+
+  // 분석마비(analysis paralysis) 감지: 스텝을 넘겨가며 사고/행동이 거의 같은 내용으로
+  // 반복되면(진전 없이 같은 계획 재탕) 중단한다. 이 횟수만큼 연속 유사하면 작업 중단.
+  // 중간(floor/2)에서 "한 접근에 커밋하고 즉시 실행하라"는 강한 넛지를 1회 넣는다.
+  paralysisAbortRounds: 4,
+  // 직전 몇 스텝과의 char 3-gram 겹침 계수 임계값(0~1). 실측: 재탕 0.53~0.65 / 진짜 진전 0.12~0.24
+  // → 0.45면 재탕은 잡고 진전 오탐 여유는 넉넉(0.45 vs 0.24).
+  paralysisSimilarity: 0.45,
 
   // Ralph 루프 백스톱: 정체·시간 안전망이 있으므로 높게 둔다(실제 종료는 보통 success/stall/timeout).
   // 무한 방지용 최후 상한일 뿐, 이 값에 자주 걸리면 너무 낮은 것이다. /ralph <N> <목표>로 실행마다 덮어쓸 수 있음.
@@ -64,6 +86,9 @@ export const config = {
   // 컨텍스트 압축 임계값(추정 토큰). 서버 한계의 60%에서 압축을 시작해
   // 응답 생성·도구 결과가 들어갈 여유를 남긴다. (서버 한계를 절대 넘지 않도록)
   compactThreshold: Math.floor(contextSize * 0.6),
+
+  // mini-claude-code 프로젝트 루트 (스킬·하네스를 여기 하위에서 읽는다)
+  projectRoot,
 
   // 에이전트 작업 루트 (도구 접근을 이 디렉터리로 제한)
   workdir: process.cwd(),

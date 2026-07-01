@@ -15,6 +15,11 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
+# 스킬·하네스(정적 자산)를 이미지에 포함 — 이제 프로젝트 안(<루트>/skills, <루트>/harness-100)에서 읽는다.
+# 코드는 dist/에서 실행되므로 프로젝트 루트(/app) 하위에 그대로 둔다.
+COPY skills ./skills
+COPY harness-100 ./harness-100
+
 # 비루트 사용자 + 작업 디렉터리(/work). 에이전트는 /work 안에서만 파일을 만든다.
 RUN useradd -m -u 1001 agent \
  && mkdir -p /work /home/agent/.mcc \

@@ -10,6 +10,7 @@
 import { runAgent, resetSession } from "./agent.js";
 import { config } from "./config.js";
 import { ConvergenceController } from "./loop.js";
+import { isAborted } from "./io.js";
 
 const DONE = "RALPH_DONE";
 
@@ -31,6 +32,10 @@ export async function ralphLoop(goal: string, maxIterations = config.ralphMaxIte
   console.log(`   (각 반복은 컨텍스트를 리셋하고 PROGRESS.md로 상태를 이어받습니다)\n`);
 
   while (true) {
+    if (isAborted()) {
+      console.log("\n⛔ Ralph 루프가 취소되었습니다.\n");
+      return;
+    }
     const turn = loop.begin();
     if (!turn.proceed) break;
 
@@ -44,8 +49,9 @@ export async function ralphLoop(goal: string, maxIterations = config.ralphMaxIte
       `[지시]`,
       `1) 먼저 PROGRESS.md가 있으면 read_file로 읽어 지금까지의 진행 상황과 남은 일을 파악하라. 없으면 새로 시작이다.`,
       `2) 전체 목표를 향해 '다음 한 단계'만 수행하라(한 번에 너무 많이 하려 하지 말 것). 파일 생성·수정·명령 실행 등 실제 작업을 하라.`,
-      `3) 작업 후 PROGRESS.md를 write_file로 갱신하라: "## 완료"와 "## 남은 일" 섹션에 항목을 정리해 다음 반복이 이어받을 수 있게 하라.`,
-      `4) 전체 목표가 완전히 달성되어 더 할 일이 없으면, 마지막에 정확히 ${DONE} 한 단어만 출력하라. 아직 남았으면 출력하지 마라.`,
+      `3) 작업 중 모든 생성 내용은 한국어로 한다.`,
+      `4) 작업 후 PROGRESS.md를 write_file로 갱신하라: "## 완료"와 "## 남은 일" 섹션에 항목을 정리해 다음 반복이 이어받을 수 있게 하라.`,
+      `5) 전체 목표가 완전히 달성되어 더 할 일이 없으면, 마지막에 정확히 ${DONE} 한 단어만 출력하라. 아직 남았으면 출력하지 마라.`,
     ].join("\n");
 
     const finalText = await runAgent(prompt);

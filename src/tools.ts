@@ -2,15 +2,106 @@
 // 각 도구는 (1) LLM에게 보낼 JSON 스키마, (2) 실제 실행 함수로 구성됩니다.
 
 import { readFile, writeFile, readdir, stat, mkdir } from "node:fs/promises";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import { resolve, join, relative, isAbsolute, dirname } from "node:path";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { config } from "./config.js";
 import { getSkills, getSkillBody, skillsDir } from "./skills.js";
+import { getLibrarySkillBody } from "./skill-router.js";
 import { callMcpTool, mcpHasTool } from "./mcp.js";
+import { activeSignal } from "./io.js";
 
-const execAsync = promisify(exec);
+// run_command 실행기: 취소(abort) 시 자식 프로세스 '트리 전체'를 종료한다.
+// execAsync/exec의 abort·timeout은 직속 셸만 죽여, 그 셸이 띄운 손자 프로세스
+// (npm run dev, node server.js 등)가 Windows에서 고아로 남는다. 그래서
+// Windows는 taskkill /T, POSIX는 프로세스 그룹(-pid) kill로 트리째 종료한다.
+const RUN_TIMEOUT_MS = 120_000;
+const RUN_MAX_OUTPUT = 1024 * 1024 * 10;
+
+function runCommand(
+  command: string,
+  signal: AbortSignal | undefined,
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolveP, rejectP) => {
+    const isWin = process.platform === "win32";
+    const child = spawn(command, {
+      cwd: config.workdir,
+      shell: config.shell ?? true, // config.shell(Git Bash) 없으면 플랫폼 기본 셸
+      detached: !isWin, // POSIX: 자체 프로세스 그룹 생성 → -pid로 그룹 전체 종료
+      windowsHide: true,
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d) => {
+      if (stdout.length < RUN_MAX_OUTPUT) stdout += d.toString();
+    });
+    child.stderr?.on("data", (d) => {
+      if (stderr.length < RUN_MAX_OUTPUT) stderr += d.toString();
+    });
+
+    const killTree = () => {
+      const pid = child.pid;
+      if (pid == null) return;
+      if (isWin) {
+        // 셸 + 손자 프로세스까지 강제 종료
+        try {
+          spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+        } catch {
+          /* 무시 */
+        }
+      } else {
+        try {
+          process.kill(-pid, "SIGKILL"); // 프로세스 그룹 전체
+        } catch {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* 무시 */
+          }
+        }
+      }
+    };
+
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      killTree();
+      cleanup();
+      rejectP(new Error("사용자가 명령을 취소함"));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      killTree();
+      cleanup();
+      rejectP(new Error(`명령 시간 초과(${RUN_TIMEOUT_MS / 1000}s)로 중단됨`));
+    }, RUN_TIMEOUT_MS);
+
+    if (signal) {
+      if (signal.aborted) return onAbort();
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectP(err);
+    });
+    child.on("close", () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolveP({ stdout, stderr });
+    });
+  });
+}
 
 // 경로가 허용 루트(작업 디렉터리 또는 스킬 디렉터리) 밖으로 나가지 못하게 제한.
 function safePath(p: string): string {
@@ -223,7 +314,8 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         return `OK: ${args.path} 디렉터리 생성됨`;
       }
       case "use_skill": {
-        const body = getSkillBody(args.name);
+        // 로컬 스킬(<프로젝트>/skills) 우선, 없으면 라우팅된 라이브러리(harness-100)에서 로드
+        const body = getSkillBody(args.name) ?? getLibrarySkillBody(args.name);
         if (body) return body;
         const names = getSkills().map((s) => s.name).join(", ") || "(없음)";
         return `오류: '${args.name}' 스킬을 찾지 못함. 사용 가능: ${names}`;
@@ -285,12 +377,8 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         return out.length ? out.join("\n") : "(일치 없음)";
       }
       case "run_command": {
-        const { stdout, stderr } = await execAsync(args.command, {
-          cwd: config.workdir,
-          timeout: 120_000,
-          maxBuffer: 1024 * 1024 * 10,
-          shell: config.shell, // 윈도우에선 Git Bash로 라우팅(있으면)
-        });
+        // Ctrl+C 시 실행 중인 명령의 프로세스 트리 전체를 종료(손자 프로세스 포함)
+        const { stdout, stderr } = await runCommand(args.command, activeSignal());
         return `[stdout]\n${stdout}\n[stderr]\n${stderr}`.slice(0, 20_000);
       }
       default:

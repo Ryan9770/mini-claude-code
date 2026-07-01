@@ -1,6 +1,9 @@
 # 의존성 / 빌드 산출물
 node_modules/
 dist/
+harness-100/
+skills/
+bench/
 
 # 에이전트 작업 산출물 / 테스트 잔여물
 workspace/

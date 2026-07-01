@@ -8,9 +8,10 @@ import type {
 } from "openai/resources/chat/completions";
 import { config } from "./config.js";
 import { toolSchemas, executeTool } from "./tools.js";
-import { confirm, confirmDangerous } from "./io.js";
+import { confirm, confirmDangerous, activeSignal, isAborted } from "./io.js";
 import { classifyCommand } from "./dangerous.js";
 import { getSkills } from "./skills.js";
+import { skillHint } from "./skill-router.js";
 import { logRun, loadLearnings, type RunRecord } from "./evolve.js";
 import { runSubagent } from "./subagent.js"; // 런타임에서만 사용(순환 import 안전)
 
@@ -31,9 +32,24 @@ const learningsSection = learnings
 // 실행 전 사용자 승인이 필요한 도구(파일시스템 변경·명령 실행). 읽기 전용 도구는 제외.
 const RISKY = new Set(["write_file", "edit_file", "make_dir", "run_command"]);
 
+// 분석마비 감지 시 모델에 넣는 강한 넛지.
+const PARALYSIS_NUDGE =
+  "너는 지금 같은 판단을 반복하며 진전이 없다(분석마비). 더 이상 방법을 재검토하지 마라. " +
+  "지금 즉시 하나의 접근을 골라 실제 도구 호출로 실행하라. 이미 시도해 실패한 방식은 반복하지 말고 근본 원인을 바꿔라(예: 도구가 빈 결과면 다른 수단으로 전환). " +
+  "설명·계획을 더 쓰지 말고 바로 행동하라.";
+
 const client = new OpenAI({ baseURL: config.baseURL, apiKey: config.apiKey });
 
 const shellName = config.shell ? "bash" : process.platform === "win32" ? "cmd.exe" : "sh";
+
+// 삽질 방지 핵심 규칙 — 메인/서브에이전트 '모두'가 공유해야 하는 행동 규칙.
+// (서브에이전트는 BASE_SYSTEM_PROMPT가 아니라 자체 role 프롬프트를 쓰므로 별도 주입 필요)
+export const ANTI_FLAIL_RULES = `[삽질 방지 — 반드시 지켜라]
+- 값싼 검증 먼저(fail-fast): 수백 번 반복하는 스크립트나 비싼 작업 전에, 반드시 1건으로 먼저 시험하라. 예: pip show 하나를 먼저 실행해 실제로 설명이 나오는지 확인한 뒤 전체 루프를 돌려라.
+- 결과 품질을 확인하라: 파일을 만든 뒤 head/샘플로 내용을 직접 확인하라. 값이 대부분 동일하거나 무의미하면(예: 'No description available'만 반복) 실행이 성공해도 작업은 실패다 — 성공으로 선언하지 말고 접근을 바꿔라. '파일 생성됨'은 '작업 완료'가 아니다.
+- 한 접근에 커밋하라: 같은 결정(어떤 방법을 쓸지)을 반복해서 다시 논의하지 마라. 이미 만든 스크립트를 조금씩 바꿔 새로 쓰지 마라(v2, v3 …). 방법 하나를 골라 끝까지 실행하고, 안 되면 근본 원인을 바꿔라.
+- 도구가 안 되면 방식을 바꿔라: 로컬에 설치 안 된 패키지에 pip show가 안 되듯, 도구가 빈 결과를 주면 같은 도구를 반복하지 말고 다른 수단(예: 네 자체 지식)으로 전환하라.`;
+
 export const BASE_SYSTEM_PROMPT = `당신은 로컬에서 동작하는 에이전트형 코딩 어시스턴트다.
 
 [행동 원칙]
@@ -41,6 +57,8 @@ export const BASE_SYSTEM_PROMPT = `당신은 로컬에서 동작하는 에이전
 - 도구 없이 텍스트만 답하는 것은 "작업이 완전히 끝났을 때의 최종 요약"일 때뿐이다.
 - 추측하지 말고 먼저 read_file/list_dir/grep/glob으로 사실을 확인하라.
 - 파일을 수정한 뒤에는 가능하면 run_command로 실행해 결과를 검증하라.
+
+${ANTI_FLAIL_RULES}
 
 [파일·디렉터리]
 - 디렉터리 생성은 셸 mkdir이 아니라 make_dir 도구를 사용하라.
@@ -124,7 +142,11 @@ export async function runLoop(
   userInput: string,
   record?: RunRecord
 ): Promise<string> {
-  session.history.push({ role: "user", content: userInput });
+  // 프롬프트를 읽고 관련 스킬(harness-100 등)만 동적으로 골라 이 턴에 주입한다.
+  // (전체 주입 시 소형 모델이 과부하로 붕괴하므로 상위 K개만. 관련 없으면 빈 문자열)
+  // Gemma 등 system 역할이 없는 템플릿과의 호환을 위해 별도 메시지가 아닌 user 턴에 덧붙인다.
+  const hint = skillHint(userInput);
+  session.history.push({ role: "user", content: userInput + hint });
   await maybeCompress(session);
 
   const finish = (outcome: string, text: string): string => {
@@ -136,15 +158,29 @@ export async function runLoop(
   };
 
   let consecutiveErrors = 0;
+  let nudges = 0; // '예고만 하고 멈춤'을 다시 행동하도록 떠민 횟수
+  const recentTranscripts: string[] = []; // 최근 스텝의 사고+응답(분석마비 감지용)
+  let paralysis = 0; // 연속으로 '거의 같은 내용'을 반복한 스텝 수
+  let paralysisNudged = false; // 강한 넛지를 이미 1회 넣었는지
   for (let step = 0; step < config.maxSteps; step++) {
+    if (isAborted()) {
+      console.log("\n⛔ 작업이 취소되었습니다.\n");
+      return finish("aborted", "");
+    }
     if (record) record.steps = step + 1;
     await maybeCompress(session); // 매 스텝 선제 압축 — 초과가 나기 전에 줄인다
     let content = "";
     let toolCalls: ChatCompletionMessageToolCall[] = [];
+    let transcript = "";
     try {
-      ({ content, toolCalls } = await streamAssistant(session));
+      ({ content, toolCalls, transcript } = await streamAssistant(session));
       consecutiveErrors = 0;
     } catch (err: any) {
+      // 사용자 취소(Ctrl+C)면 오류 처리·재시도 없이 즉시 정리하고 종료
+      if (isAborted()) {
+        console.log("\n⛔ 작업이 취소되었습니다.\n");
+        return finish("aborted", "");
+      }
       consecutiveErrors++;
       const emsg = String(err?.message ?? err);
       record?.errors.push(emsg.slice(0, 120));
@@ -190,9 +226,58 @@ export async function runLoop(
       ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
     });
 
-    if (toolCalls.length === 0) return finish("done", content);
+    // ── 분석마비 감지(스텝 간): 이번 사고/응답이 최근 스텝들과 거의 같으면 진전 없이 재탕 중 ──
+    // tool_call↔tool 짝을 깨지 않도록, 중단은 즉시 하되 넛지는 '스텝 마무리 시점'에만 넣는다.
+    let paralysisNudgeNow = false;
+    {
+      const sim = maxSimilarity(transcript, recentTranscripts);
+      recentTranscripts.push(transcript);
+      if (recentTranscripts.length > 3) recentTranscripts.shift();
+      paralysis =
+        transcript.length > 300 && sim >= config.paralysisSimilarity ? paralysis + 1 : 0;
+      if (paralysis >= config.paralysisAbortRounds) {
+        console.log(
+          `\n🌀 분석마비 감지 — ${paralysis}스텝 연속 거의 같은 내용 반복(진전 없음). 중단합니다.\n`
+        );
+        return finish("paralysis", content);
+      }
+      if (paralysis === Math.floor(config.paralysisAbortRounds / 2) && !paralysisNudged) {
+        paralysisNudged = true;
+        paralysisNudgeNow = true;
+        console.log("  🌀 같은 계획 반복 감지 — 커밋하고 즉시 실행하도록 넛지합니다.");
+      }
+    }
+
+    if (toolCalls.length === 0) {
+      // 분석마비 넛지가 걸렸으면(도구 없음 → 짝 문제 없음) 바로 떠밀고 다음 스텝
+      if (paralysisNudgeNow) {
+        session.history.push({ role: "user", content: PARALYSIS_NUDGE });
+        continue;
+      }
+      // 도구 없이 '이제 ~하겠습니다'로 끝낸 경우 → 실제로 안 끝난 것일 수 있다.
+      // 미래 작업을 예고하는 신호가 있으면 즉시 실행하도록 떠민다(최대 maxNudges회).
+      if (announcesMoreWork(content) && nudges < config.maxNudges) {
+        nudges++;
+        console.log("  ↻ 예고만 하고 멈춤 — 즉시 실행하도록 넛지합니다.");
+        session.history.push({
+          role: "user",
+          content:
+            "방금 말한 작업을 지금 바로 도구로 실행하라(write_file/run_command 등). " +
+            "더 이상 설명하거나 다음 단계를 예고하지 마라. " +
+            "정말로 모든 작업이 끝났다면 'DONE'이라고만 답하라.",
+        });
+        continue;
+      }
+      return finish("done", content);
+    }
+
+    nudges = 0; // 도구를 호출해 진전이 있었으면 넛지 카운트 리셋
 
     for (const call of toolCalls) {
+      if (isAborted()) {
+        console.log("\n⛔ 작업이 취소되었습니다.\n");
+        return finish("aborted", "");
+      }
       const name = call.function.name;
       if (record) record.tools[name] = (record.tools[name] ?? 0) + 1;
       let args: Record<string, any> = {};
@@ -233,6 +318,11 @@ export async function runLoop(
       }
       session.history.push({ role: "tool", tool_call_id: call.id, content: result });
     }
+
+    // 도구 결과를 모두 넣은 뒤(짝 유지) 분석마비 넛지를 추가
+    if (paralysisNudgeNow) {
+      session.history.push({ role: "user", content: PARALYSIS_NUDGE });
+    }
   }
   console.log(`\n⚠️  최대 ${config.maxSteps}스텝에 도달해 중단했습니다.\n`);
   return finish("max_steps", "");
@@ -242,17 +332,36 @@ export async function runLoop(
 async function streamAssistant(session: Session): Promise<{
   content: string;
   toolCalls: ChatCompletionMessageToolCall[];
+  transcript: string; // 사고(reasoning)+본문 합본 — 스텝 간 분석마비 감지에 사용
 }> {
-  const stream = await client.chat.completions.create({
-    model: config.model,
-    messages: session.history,
-    tools: session.tools,
-    temperature: config.temperature,
-    frequency_penalty: config.frequencyPenalty,
-    presence_penalty: config.presencePenalty,
-    max_tokens: config.maxResponseTokens, // 한 응답이 무한정 길어지는 것을 하드 차단
-    stream: true,
-  });
+  const signal = activeSignal();
+  const stream = await client.chat.completions.create(
+    {
+      model: config.model,
+      messages: session.history,
+      tools: session.tools,
+      temperature: config.temperature,
+      frequency_penalty: config.frequencyPenalty,
+      presence_penalty: config.presencePenalty,
+      max_tokens: config.maxResponseTokens, // 한 응답이 무한정 길어지는 것을 하드 차단
+      stream: true,
+    },
+    { signal } // Ctrl+C 시 진행 중인 스트림을 즉시 취소
+  );
+
+  // 신호에만 의존하면 SDK 버전/플랫폼에 따라 루프가 늦게 풀릴 수 있으므로,
+  // abort 시 스트림 컨트롤러를 직접 닫아 서버 측 생성도 즉시 끊는다.
+  const onAbort = () => {
+    try {
+      (stream as any).controller?.abort();
+    } catch {
+      /* 무시 */
+    }
+  };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
 
   let content = "";
   let printedContent = false;
@@ -264,6 +373,8 @@ async function streamAssistant(session: Session): Promise<{
   let lastChecked = 0;
 
   for await (const chunk of stream) {
+    // 취소되면 즉시 루프를 빠져나간다(이터레이터가 늦게 throw해도 무한 대기 방지).
+    if (signal?.aborted) break;
     const delta: any = chunk.choices[0]?.delta;
     if (!delta) continue;
 
@@ -312,11 +423,16 @@ async function streamAssistant(session: Session): Promise<{
     }
   }
 
+  signal?.removeEventListener("abort", onAbort);
   if (printedContent || printedThinking) process.stdout.write("\n");
-  return { content, toolCalls: calls.filter(Boolean) };
+  // 취소로 루프를 벗어난 경우: 부분 응답을 처리하지 않고 즉시 취소로 분기시킨다.
+  if (signal?.aborted) throw new Error("ABORTED: 사용자 취소");
+  return { content, toolCalls: calls.filter(Boolean), transcript: loopBuf };
 }
 
-// 반복 루프 판정: (1) 동일 라인이 과도하게 반복 (2) 개행 없는 짧은 주기 반복
+// 반복 루프 판정:
+//  (1) 동일 라인 과다 반복  (2) 개행 없는 짧은 주기 반복
+//  (3) 낮은 다양성 — 표현을 조금씩 바꿔가며 같은 말을 되풀이하는 '의도 루프'(analysis paralysis)
 function isLooping(text: string): boolean {
   const t = text.slice(-6000);
   const lines = t.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -328,7 +444,7 @@ function isLooping(text: string): boolean {
       if (n >= 6) return true; // 같은 문장 6회 이상 (교대 반복도 각자 누적되어 잡힘)
     }
   }
-  // 개행 없는 반복: 마지막 300자가 어떤 주기(4~150)로든 완전히 반복되면 루프로 본다.
+  // (2) 개행 없는 반복: 마지막 300자가 어떤 주기(4~150)로든 완전히 반복되면 루프.
   const tail = t.slice(-300);
   for (let p = 4; p <= 150; p++) {
     if (tail.length < p * 3) continue;
@@ -341,7 +457,53 @@ function isLooping(text: string): boolean {
     }
     if (periodic) return true;
   }
+  // (3) 다양성: 최근 1500자에서 새로운 내용(고유 3-gram) 비율이 낮으면 같은 말 재활용으로 본다.
+  // 정상 산문 ~0.9 / 코드 ~0.7 / 의도 루프 ~0.15 → 0.35로 분리.
+  if (t.length > 1500) {
+    const recent = t.slice(-1500);
+    const grams = new Set<string>();
+    let total = 0;
+    for (let i = 0; i + 3 <= recent.length; i++) {
+      grams.add(recent.slice(i, i + 3));
+      total++;
+    }
+    if (total > 0 && grams.size / total < 0.35) return true;
+  }
   return false;
+}
+
+// ── 스텝 간 유사도(분석마비 감지) ──
+// 문자 3-gram 겹침 계수(overlap coefficient): 작은 쪽 기준이라 길이 차가 큰 재탕에도 강하다.
+function charGrams3(s: string): Set<string> {
+  const t = s.toLowerCase().replace(/\s+/g, "");
+  const set = new Set<string>();
+  for (let i = 0; i + 3 <= t.length; i++) set.add(t.slice(i, i + 3));
+  return set;
+}
+function overlapCoef(a: Set<string>, b: Set<string>): number {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / Math.min(a.size, b.size);
+}
+// 이번 텍스트가 최근 스텝들과 얼마나 겹치는지(최댓값). 교대 반복도 잡히도록 최근 N개와 비교.
+function maxSimilarity(text: string, recent: string[]): number {
+  if (!recent.length) return 0;
+  const g = charGrams3(text);
+  let max = 0;
+  for (const r of recent) max = Math.max(max, overlapCoef(g, charGrams3(r)));
+  return max;
+}
+
+// 도구 없이 끝난 응답이 '앞으로 할 일을 예고'하는지 판정(=실제로 안 끝남).
+// 완료를 명시했거나 미래 작업 신호가 없으면 false(진짜 최종 답변).
+function announcesMoreWork(text: string): boolean {
+  if (/\bDONE\b/.test(text)) return false;
+  const done = /(완료(했|됐|함|하였)|끝냈|마쳤|마무리|done\b|finished|completed)/i;
+  const future =
+    /(하겠습니다|할게요|할 것|진행하겠|작성하겠|만들겠|구현하겠|생성하겠|추가하겠|이제\s|다음\s*단계|먼저\s|단계:|step\s*\d|i'?ll|let'?s|going to|will (create|write|implement|add|make))/i;
+  if (done.test(text) && !future.test(text)) return false; // 끝났다고 보고
+  return future.test(text);
 }
 
 // ── 컨텍스트 압축: 오래된 대화를 요약해 교체 ──

@@ -8,11 +8,11 @@
 //   1) 시작 시 모든 스킬의 (name, description)만 시스템 프롬프트에 노출
 //   2) 모델이 use_skill(name)을 호출하면 그때 전체 SKILL.md 본문을 컨텍스트에 로드
 //
-// 스킬 위치: 기본 ~/.mcc/skills (MCC_SKILLS_DIR로 변경 가능).
-// skillsmp.com 등에서 받은 스킬 폴더를 이 디렉터리에 넣으면 됩니다.
+// 스킬 위치: 기본 <프로젝트루트>/skills (MCC_SKILLS_DIR로 변경 가능).
+// 받은 스킬 폴더를 이 디렉터리에 넣으면 됩니다.
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { homedir } from "node:os";
+import { config } from "./config.js";
 
 export interface Skill {
   name: string;
@@ -23,7 +23,8 @@ export interface Skill {
 let cache: Skill[] | null = null;
 
 export function skillsDir(): string {
-  return process.env.MCC_SKILLS_DIR ?? join(homedir(), ".mcc", "skills");
+  // 기본: 프로젝트 안 skills/ (MCC_SKILLS_DIR로 덮어쓰기 가능)
+  return process.env.MCC_SKILLS_DIR ?? join(config.projectRoot, "skills");
 }
 
 // 아주 단순한 YAML 프론트매터 파서 (name, description만 필요)

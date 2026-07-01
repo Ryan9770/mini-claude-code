@@ -3,7 +3,7 @@
 //
 // 에이전트 간 "통신"은 공유 파일시스템(workdir)을 통해 이뤄진다 — Ralph의 PROGRESS.md와 같은 원리.
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
-import { createSession, runLoop } from "./agent.js";
+import { createSession, runLoop, ANTI_FLAIL_RULES } from "./agent.js";
 import { toolSchemas } from "./tools.js";
 
 // 읽기 전용 도구만 (탐색/리뷰 서브에이전트는 파일을 바꾸지 않는다)
@@ -43,7 +43,8 @@ export async function runSubagent(type: string, task: string): Promise<string> {
   const { prompt, tools } = ROLES[role];
 
   console.log(`\n  ┌─── 🧩 서브에이전트[${role}] 시작 ───`);
-  const session = createSession(prompt, tools, role);
+  // 서브에이전트도 삽질 방지 규칙을 공유해야 한다(/critic·/ralph는 전부 서브에이전트로 도므로).
+  const session = createSession(`${prompt}\n\n${ANTI_FLAIL_RULES}`, tools, role);
   const result = await runLoop(session, task); // 텔레메트리 없음(메인만 기록)
   console.log(`  └─── 🧩 서브에이전트[${role}] 완료 ───\n`);
 

@@ -3,6 +3,7 @@
 //
 // 로컬 모델은 한 번에 완벽하지 않으므로, 독립된 '리뷰어 시각'을 한 패스 더 통과시켜 품질을 끌어올린다.
 import { runSubagent } from "./subagent.js";
+import { isAborted } from "./io.js";
 
 export async function buildWithCritic(task: string, rounds = 2): Promise<void> {
   console.log(`\n🔬 Critic 루프 시작 — 최대 ${rounds}라운드`);
@@ -12,6 +13,10 @@ export async function buildWithCritic(task: string, rounds = 2): Promise<void> {
   let impl = await runSubagent("code", `다음 작업을 구현하라:\n${task}`);
 
   for (let round = 1; round <= rounds; round++) {
+    if (isAborted()) {
+      console.log("\n⛔ Critic 루프가 취소되었습니다.\n");
+      return;
+    }
     console.log(`\n──────── 검토 라운드 ${round}/${rounds} ────────`);
 
     // 2) 리뷰 (읽기 전용으로 실제 파일을 검사)
