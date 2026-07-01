@@ -56,7 +56,9 @@ export const config = {
   presencePenalty: 0.0,
 
   // 한 응답의 최대 출력 토큰. 반복 루프·폭주가 무한정 길어지는 것을 하드 차단.
-  maxResponseTokens: 4096,
+  // 너무 작으면(4096) 긴 콘텐츠·도구 인자가 도중에 잘려 tool_call JSON이 깨지고 서버 500이 난다
+  // (닫는 따옴표 없이 truncated). 폭주는 isLooping 감지기가 별도로 잡으므로 넉넉히 8192로. MCC_MAX_TOKENS로 조정.
+  maxResponseTokens: Number(process.env.MCC_MAX_TOKENS ?? 8192),
 
   // 모델 응답 오류(예: 깨진 tool JSON으로 인한 500) 연속 발생 시 재시도 허용 횟수.
   maxModelRetries: 2,

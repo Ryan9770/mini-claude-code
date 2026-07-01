@@ -11,7 +11,7 @@ services:
       # 같은 호스트의 서버면 host.docker.internal, 원격이면 그 LAN IP.
       MCC_BASE_URL: "http://10.1.10.111:8080/v1"
       MCC_MODEL: "gemma4-26b-a4b"
-      MCC_CONTEXT_SIZE : 65536
+      MCC_CONTEXT_SIZE : 32768
     volumes:
       # 에이전트 작업 결과를 호스트와 공유 (이 폴더만 노출됨)
       - ./workspace:/work
