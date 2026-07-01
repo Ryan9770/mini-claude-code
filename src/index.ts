@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 미니 클로드 코드 — 대화형 CLI 진입점
 import { config } from "./config.js";
-import { runAgent, addMainTools } from "./agent.js";
+import { runAgent, runChat, classifyIntent, addMainTools } from "./agent.js";
 import { ralphLoop } from "./ralph.js";
 import { buildWithCritic } from "./critic.js";
 import { getSkills, skillsDir } from "./skills.js";
@@ -12,6 +12,21 @@ import { rl, beginAbortable, endAbortable, requestAbort } from "./io.js";
 
 let busy = false; // 작업 실행 중인지
 let lastInterrupt = 0; // 동시 중복 SIGINT(같은 Ctrl+C가 rl+process 둘 다 깨우는 것) 무시용
+let mode: "auto" | "agent" | "chat" = "auto"; // 입력 라우팅: 자동 판단 / 강제 에이전트 / 강제 챗봇
+
+// 입력을 대상 모드로 실행(취소·busy 처리 공통). chat=도구 없는 단발 대화, agent=에이전트 루프.
+async function runRouted(input: string, target: "agent" | "chat"): Promise<void> {
+  if (!input) return;
+  busy = true;
+  beginAbortable();
+  try {
+    if (target === "chat") await runChat(input);
+    else await runAgent(input);
+  } finally {
+    busy = false;
+    endAbortable();
+  }
+}
 
 // Ctrl+C: 작업 중이면 그 작업만 취소, 유휴면 종료. (rl과 process 양쪽에 걸어 어느 상태든 잡음)
 function onInterrupt() {
@@ -48,12 +63,13 @@ async function main() {
   addMainTools(getMcpTools());
   if (mcp.servers) console.log(`  mcp     : ${mcp.servers}개 서버, ${mcp.tools}개 도구`);
 
+  console.log(`  모드: /auto(기본) · /agent · /chat  — 현재: ${mode}  (/chat <메시지> = 단발 강제)`);
   console.log(`  명령: /ralph | /critic | /skills | /evolve | /mcp | exit  (작업 중 Ctrl+C=취소)\n`);
 
   while (true) {
     let input: string;
     try {
-      input = (await rl.question("👤 > ")).trim();
+      input = (await rl.question(`👤(${mode}) > `)).trim();
     } catch {
       break; // EOF(Ctrl+D)·입력 스트림 종료 시 깔끔하게 종료
     }
@@ -61,6 +77,14 @@ async function main() {
     if (input === "exit" || input === "quit") break;
 
     try {
+      // ── 모드 전환(스티키) ──
+      if (input === "/auto") { mode = "auto"; console.log("🔀 모드: auto — 프롬프트를 보고 자동 판단\n"); continue; }
+      if (input === "/agent") { mode = "agent"; console.log("🔀 모드: agent — 항상 에이전트(도구+루프)\n"); continue; }
+      if (input === "/chat") { mode = "chat"; console.log("🔀 모드: chat — 도구 없는 순수 대화\n"); continue; }
+      // ── 단발 강제(모드는 그대로): /agent <메시지> · /chat <메시지> ──
+      if (input.startsWith("/agent ")) { await runRouted(input.slice(7).trim(), "agent"); continue; }
+      if (input.startsWith("/chat ")) { await runRouted(input.slice(6).trim(), "chat"); continue; }
+
       if (input === "/evolve") {
         await evolve();
         continue;
@@ -127,14 +151,10 @@ async function main() {
         }
         continue;
       }
-      busy = true;
-      beginAbortable();
-      try {
-        await runAgent(input);
-      } finally {
-        busy = false;
-        endAbortable();
-      }
+      // 일반 입력: auto면 의도 분류로 라우팅, 아니면 지정 모드로.
+      const target = mode === "auto" ? await classifyIntent(input) : mode;
+      if (mode === "auto") console.log(`  🔀 자동 판단 → ${target}`);
+      await runRouted(input, target);
     } catch (err: any) {
       console.error(`\n❌ 에러: ${err.message}`);
       console.error(`   로컬 모델 서버(${config.baseURL})가 실행 중인지 확인하세요.\n`);

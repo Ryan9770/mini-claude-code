@@ -7,7 +7,9 @@ import { createSession, runLoop, ANTI_FLAIL_RULES } from "./agent.js";
 import { toolSchemas } from "./tools.js";
 
 // 읽기 전용 도구만 (탐색/리뷰 서브에이전트는 파일을 바꾸지 않는다)
-const READONLY_NAMES = new Set(["read_file", "list_dir", "glob", "grep", "use_skill"]);
+const READONLY_NAMES = new Set([
+  "read_file", "list_dir", "glob", "grep", "use_skill", "web_search", "fetch_url",
+]);
 const readonlyTools: ChatCompletionTool[] = toolSchemas.filter((t) =>
   READONLY_NAMES.has(t.function.name)
 );

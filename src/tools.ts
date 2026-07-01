@@ -8,6 +8,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { config } from "./config.js";
 import { getSkills, getSkillBody, skillsDir } from "./skills.js";
 import { getLibrarySkillBody } from "./skill-router.js";
+import { askUserChoice } from "./io.js";
 import { callMcpTool, mcpHasTool } from "./mcp.js";
 import { activeSignal } from "./io.js";
 
@@ -101,6 +102,109 @@ function runCommand(
       resolveP({ stdout, stderr });
     });
   });
+}
+
+// 검증 게이트 실행: config.verifyCmd를 돌려 '종료코드'로 통과/실패를 판정한다.
+// runCommand와 달리 exit code가 핵심(critic 루프의 객관 게이트). 미설정이면 null(게이트 없음).
+export async function runVerify(): Promise<{ ok: boolean; output: string } | null> {
+  const cmd = config.verifyCmd;
+  if (!cmd) return null;
+  return new Promise((resolveP) => {
+    const child = spawn(cmd, {
+      cwd: config.workdir,
+      shell: config.shell ?? true,
+      windowsHide: true,
+    });
+    let out = "";
+    const cap = (d: Buffer) => {
+      if (out.length < RUN_MAX_OUTPUT) out += d.toString();
+    };
+    child.stdout?.on("data", cap);
+    child.stderr?.on("data", cap);
+    let done = false;
+    const finish = (ok: boolean, extra = "") => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolveP({ ok, output: (out + extra).slice(0, 20_000) });
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* 무시 */
+      }
+      finish(false, `\n(검증 시간 초과 ${RUN_TIMEOUT_MS / 1000}s)`);
+    }, RUN_TIMEOUT_MS);
+    child.on("error", (err) => finish(false, `\n(검증 실행 오류: ${err.message})`));
+    child.on("close", (code) => finish(code === 0));
+  });
+}
+
+// ── 웹 도구(브라우저 불필요, Node 내장 fetch) ──────────────────
+const WEB_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+// 사용자 취소(Ctrl+C) + 20초 타임아웃을 함께 거는 신호
+function webSignal(): AbortSignal {
+  const t = AbortSignal.timeout(20_000);
+  const s = activeSignal();
+  return s ? AbortSignal.any([s, t]) : t;
+}
+
+// HTML을 대략적인 평문으로 변환(스크립트/스타일 제거 → 태그 제거 → 엔티티 일부 복원)
+function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0?39;|&#x27;/gi, "'")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// DuckDuckGo HTML 엔드포인트로 검색(키·브라우저 불필요). 상위 결과의 제목·URL·요약 반환.
+async function webSearch(query: string, limit = 8): Promise<string> {
+  const url = "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query);
+  const res = await fetch(url, { headers: { "User-Agent": WEB_UA }, signal: webSignal() });
+  if (!res.ok) return `오류: 검색 실패 (HTTP ${res.status})`;
+  const html = await res.text();
+
+  const snippets: string[] = [];
+  const snipRe = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+  for (let sm; (sm = snipRe.exec(html)); ) snippets.push(htmlToText(sm[1]));
+
+  const out: string[] = [];
+  const linkRe = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  for (let m, i = 0; (m = linkRe.exec(html)) && out.length < limit; i++) {
+    let link = m[1];
+    const uddg = link.match(/[?&]uddg=([^&]+)/); // DDG 리다이렉트에서 실제 URL 추출
+    if (uddg) link = decodeURIComponent(uddg[1]);
+    else if (link.startsWith("//")) link = "https:" + link;
+    const title = htmlToText(m[2]);
+    if (!title) continue;
+    out.push(`${out.length + 1}. ${title}\n   ${link}\n   ${snippets[i] ?? ""}`.trimEnd());
+  }
+  return out.length
+    ? out.join("\n\n")
+    : "검색 결과 없음(질의를 바꾸거나, 엔드포인트 형식이 변경됐을 수 있음).";
+}
+
+// URL의 내용을 평문으로 가져온다(HTML은 본문만 추출). web_search 결과 링크 읽기에 사용.
+async function fetchUrl(url: string): Promise<string> {
+  if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+  const res = await fetch(url, { headers: { "User-Agent": WEB_UA }, signal: webSignal() });
+  if (!res.ok) return `오류: 가져오기 실패 (HTTP ${res.status})`;
+  const ct = res.headers.get("content-type") ?? "";
+  const body = await res.text();
+  const text = /html|xml/i.test(ct) || /^\s*</.test(body) ? htmlToText(body) : body;
+  return text.slice(0, 15_000) || "(빈 응답)";
 }
 
 // 경로가 허용 루트(작업 디렉터리 또는 스킬 디렉터리) 밖으로 나가지 못하게 제한.
@@ -287,6 +391,55 @@ export const toolSchemas: ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "ask_user",
+      description:
+        "결정이 모호하거나 정보가 부족해 진행 방향을 정할 수 없을 때 사용한다. 추측하거나 같은 고민을 반복하지 말고, 사용자에게 번호 선택지를 제시해 물어보고 그 답(선택 또는 자유입력)을 받는다. 예: 용어의 의미가 불분명, 자료를 어디서 찾을지 모름, 여러 접근 중 무엇을 원하는지 확인 필요.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "무엇이 모호한지 명확히 담은 질문" },
+          options: {
+            type: "array",
+            items: { type: "string" },
+            description: "제시할 선택지 2~4개(간결하게). '기타(직접 입력)'는 자동으로 추가됨",
+          },
+        },
+        required: ["question", "options"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "web_search",
+      description:
+        "웹을 검색해 상위 결과(제목·URL·요약)를 반환한다. 최신 정보·외부 자료·블로그 포스트·문서를 찾을 때 사용(브라우저 불필요). 찾은 URL의 실제 내용은 fetch_url로 읽어라.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "검색어" },
+          limit: { type: "number", description: "결과 개수(기본 8)" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "fetch_url",
+      description:
+        "URL의 페이지 내용을 텍스트로 가져온다(HTML은 본문만 추출). web_search로 찾은 링크의 실제 내용을 읽어 요약·분석할 때 사용.",
+      parameters: {
+        type: "object",
+        properties: { url: { type: "string", description: "가져올 페이지 URL" } },
+        required: ["url"],
+      },
+    },
+  },
 ];
 
 // ── 도구 실행 함수 ──────────────────────────────────────────
@@ -314,12 +467,21 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         return `OK: ${args.path} 디렉터리 생성됨`;
       }
       case "use_skill": {
-        // 로컬 스킬(<프로젝트>/skills) 우선, 없으면 라우팅된 라이브러리(harness-100)에서 로드
+        // 로컬 스킬(<프로젝트>/skills) 우선, 없으면 라우팅된 라이브러리(harness)에서 로드
         const body = getSkillBody(args.name) ?? getLibrarySkillBody(args.name);
         if (body) return body;
         const names = getSkills().map((s) => s.name).join(", ") || "(없음)";
         return `오류: '${args.name}' 스킬을 찾지 못함. 사용 가능: ${names}`;
       }
+      case "ask_user": {
+        const opts = Array.isArray(args.options) ? args.options.map(String) : [];
+        const answer = await askUserChoice(String(args.question ?? "어떻게 진행할까요?"), opts);
+        return `사용자 답변: ${answer}`;
+      }
+      case "web_search":
+        return await webSearch(String(args.query ?? ""), Number(args.limit) || 8);
+      case "fetch_url":
+        return await fetchUrl(String(args.url ?? ""));
       case "edit_file": {
         const p = safePath(args.path);
         const original = await readFile(p, "utf-8");

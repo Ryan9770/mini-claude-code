@@ -8,7 +8,7 @@ import type {
 } from "openai/resources/chat/completions";
 import { config } from "./config.js";
 import { toolSchemas, executeTool } from "./tools.js";
-import { confirm, confirmDangerous, activeSignal, isAborted } from "./io.js";
+import { confirm, confirmDangerous, activeSignal, isAborted, askUserChoice } from "./io.js";
 import { classifyCommand } from "./dangerous.js";
 import { getSkills } from "./skills.js";
 import { skillHint } from "./skill-router.js";
@@ -34,9 +34,9 @@ const RISKY = new Set(["write_file", "edit_file", "make_dir", "run_command"]);
 
 // 분석마비 감지 시 모델에 넣는 강한 넛지.
 const PARALYSIS_NUDGE =
-  "너는 지금 같은 판단을 반복하며 진전이 없다(분석마비). 더 이상 방법을 재검토하지 마라. " +
-  "지금 즉시 하나의 접근을 골라 실제 도구 호출로 실행하라. 이미 시도해 실패한 방식은 반복하지 말고 근본 원인을 바꿔라(예: 도구가 빈 결과면 다른 수단으로 전환). " +
-  "설명·계획을 더 쓰지 말고 바로 행동하라.";
+  "너는 지금 같은 판단을 반복하며 진전이 없다(분석마비). 더 이상 같은 고민을 반복하지 마라. " +
+  "정보·결정이 모호해서 막힌 거라면(무슨 뜻인지/어디서 찾는지 등) 지금 즉시 ask_user 도구로 사용자에게 선택지를 제시해 물어라. " +
+  "단지 실행을 미룬 거라면 하나의 접근을 골라 즉시 도구로 실행하라. 설명·계획을 더 쓰지 마라.";
 
 const client = new OpenAI({ baseURL: config.baseURL, apiKey: config.apiKey });
 
@@ -48,7 +48,9 @@ export const ANTI_FLAIL_RULES = `[삽질 방지 — 반드시 지켜라]
 - 값싼 검증 먼저(fail-fast): 수백 번 반복하는 스크립트나 비싼 작업 전에, 반드시 1건으로 먼저 시험하라. 예: pip show 하나를 먼저 실행해 실제로 설명이 나오는지 확인한 뒤 전체 루프를 돌려라.
 - 결과 품질을 확인하라: 파일을 만든 뒤 head/샘플로 내용을 직접 확인하라. 값이 대부분 동일하거나 무의미하면(예: 'No description available'만 반복) 실행이 성공해도 작업은 실패다 — 성공으로 선언하지 말고 접근을 바꿔라. '파일 생성됨'은 '작업 완료'가 아니다.
 - 한 접근에 커밋하라: 같은 결정(어떤 방법을 쓸지)을 반복해서 다시 논의하지 마라. 이미 만든 스크립트를 조금씩 바꿔 새로 쓰지 마라(v2, v3 …). 방법 하나를 골라 끝까지 실행하고, 안 되면 근본 원인을 바꿔라.
-- 도구가 안 되면 방식을 바꿔라: 로컬에 설치 안 된 패키지에 pip show가 안 되듯, 도구가 빈 결과를 주면 같은 도구를 반복하지 말고 다른 수단(예: 네 자체 지식)으로 전환하라.`;
+- 도구가 안 되면 방식을 바꿔라: 로컬에 설치 안 된 패키지에 pip show가 안 되듯, 도구가 빈 결과를 주면 같은 도구를 반복하지 말고 다른 수단(예: 네 자체 지식)으로 전환하라.
+- 모호하면 물어라: 용어의 뜻·자료 위치·사용자가 원하는 방향이 불분명하면, 추측하거나 같은 고민을 반복하지 말고 즉시 ask_user 도구로 사용자에게 번호 선택지를 제시해 물어라. 혼자 헤매는 것보다 한 번 묻는 게 낫다.
+- 추가 작업이 있는지 물어봐라: 작업 종료 시 추가 작업이 존재하는지 즉시 ask_user 도구로 사용자에게 번호 선택지를 제시해 물어라.`;
 
 export const BASE_SYSTEM_PROMPT = `당신은 로컬에서 동작하는 에이전트형 코딩 어시스턴트다.
 
@@ -136,13 +138,71 @@ export async function runAgent(userInput: string): Promise<string> {
   return runLoop(mainSession, userInput, record);
 }
 
+// ── 챗봇(비에이전트) 모드 ──────────────────────────────────
+// 도구 없이 '단발 응답'만 하는 순수 대화. 에이전트와 '분리된' 자체 히스토리를 쓴다.
+const CHAT_SYSTEM_PROMPT =
+  "너는 도움이 되는 대화형 어시스턴트다. 한국어로 간결하고 정확하게 답한다. " +
+  "이 모드에서는 파일·명령 등 도구를 쓸 수 없다. 실제 작업(파일 생성·수정·실행·코드베이스 조사)이 " +
+  "필요하면 방법을 설명하고, '에이전트 모드(/agent)에서 실행하라'고 안내하라.";
+const chatSession = createSession(CHAT_SYSTEM_PROMPT, [], "chat");
+
+// 챗봇 히스토리 리셋
+export function resetChat(): void {
+  chatSession.history.length = 0;
+  chatSession.history.push({ role: "system", content: CHAT_SYSTEM_PROMPT });
+}
+
+// 챗봇 단발 응답(도구·루프 없음). 자체 히스토리로 문맥을 유지한다.
+export async function runChat(userInput: string): Promise<string> {
+  chatSession.history.push({ role: "user", content: userInput });
+  await maybeCompress(chatSession);
+  try {
+    const { content } = await streamAssistant(chatSession);
+    chatSession.history.push({ role: "assistant", content: content || "" });
+    return content;
+  } catch (err: any) {
+    if (isAborted()) {
+      console.log("\n⛔ 취소되었습니다.\n");
+      return "";
+    }
+    console.log(`\n⚠️  응답 오류: ${String(err?.message ?? err).slice(0, 160)}\n`);
+    return "";
+  }
+}
+
+// 의도 분류: 이 메시지가 도구·파일시스템이 필요한 '에이전트' 작업인지 '순수 대화'인지.
+// auto 모드 라우팅에 사용. 분류 실패 시 안전하게 agent(기존 동작)로 폴백.
+export async function classifyIntent(userInput: string): Promise<"agent" | "chat"> {
+  try {
+    const res = await client.chat.completions.create({
+      model: config.model,
+      stream: false,
+      temperature: 0,
+      max_tokens: 4,
+      messages: [
+        {
+          role: "system",
+          content:
+            "다음 사용자 메시지를 분류하라. 파일 읽기/쓰기/수정, 코드 구현, 명령 실행, 프로젝트·코드베이스 조사 등 " +
+            "도구·파일시스템이 필요하면 AGENT. 개념 설명·질문·의견·잡담 등 순수 대화로 충분하면 CHAT. " +
+            "반드시 AGENT 또는 CHAT 한 단어만 출력하라.",
+        },
+        { role: "user", content: userInput },
+      ],
+    });
+    return (res.choices[0].message.content ?? "").toUpperCase().includes("AGENT") ? "agent" : "chat";
+  } catch {
+    return "agent";
+  }
+}
+
 // ── 핵심 루프: 주어진 세션에서 작업을 완료까지 수행하고 최종 텍스트를 반환 ──
 export async function runLoop(
   session: Session,
   userInput: string,
   record?: RunRecord
 ): Promise<string> {
-  // 프롬프트를 읽고 관련 스킬(harness-100 등)만 동적으로 골라 이 턴에 주입한다.
+  // 프롬프트를 읽고 관련 스킬(harness 등)만 동적으로 골라 이 턴에 주입한다.
   // (전체 주입 시 소형 모델이 과부하로 붕괴하므로 상위 K개만. 관련 없으면 빈 문자열)
   // Gemma 등 system 역할이 없는 템플릿과의 호환을 위해 별도 메시지가 아닌 user 턴에 덧붙인다.
   const hint = skillHint(userInput);
@@ -162,6 +222,23 @@ export async function runLoop(
   const recentTranscripts: string[] = []; // 최근 스텝의 사고+응답(분석마비 감지용)
   let paralysis = 0; // 연속으로 '거의 같은 내용'을 반복한 스텝 수
   let paralysisNudged = false; // 강한 넛지를 이미 1회 넣었는지
+
+  // 분석마비 최종 방어선: 스스로 못 풀면 죽이지 않고 사용자에게 넘긴다(HITL).
+  // true 반환 시 호출부가 작업을 종료한다. false면 사용자 지시를 주입하고 계속.
+  const handoffToUser = async (): Promise<boolean> => {
+    console.log(`\n🌀 분석마비 — 진전이 없어 사용자에게 넘깁니다.`);
+    const choice = await askUserChoice(
+      "계속 같은 고민을 반복하고 있어요. 어떻게 진행할까요?",
+      ["지금까지 파악한 정보로 최선을 다해 진행", "이 작업 중단"]
+    );
+    if (/중단|취소|stop|abort/i.test(choice)) return true;
+    session.history.push({ role: "user", content: `사용자 지시: ${choice}` });
+    paralysis = 0;
+    paralysisNudged = false;
+    recentTranscripts.length = 0;
+    return false;
+  };
+
   for (let step = 0; step < config.maxSteps; step++) {
     if (isAborted()) {
       console.log("\n⛔ 작업이 취소되었습니다.\n");
@@ -229,6 +306,7 @@ export async function runLoop(
     // ── 분석마비 감지(스텝 간): 이번 사고/응답이 최근 스텝들과 거의 같으면 진전 없이 재탕 중 ──
     // tool_call↔tool 짝을 깨지 않도록, 중단은 즉시 하되 넛지는 '스텝 마무리 시점'에만 넣는다.
     let paralysisNudgeNow = false;
+    let paralysisHandoffNow = false;
     {
       const sim = maxSimilarity(transcript, recentTranscripts);
       recentTranscripts.push(transcript);
@@ -236,20 +314,21 @@ export async function runLoop(
       paralysis =
         transcript.length > 300 && sim >= config.paralysisSimilarity ? paralysis + 1 : 0;
       if (paralysis >= config.paralysisAbortRounds) {
-        console.log(
-          `\n🌀 분석마비 감지 — ${paralysis}스텝 연속 거의 같은 내용 반복(진전 없음). 중단합니다.\n`
-        );
-        return finish("paralysis", content);
-      }
-      if (paralysis === Math.floor(config.paralysisAbortRounds / 2) && !paralysisNudged) {
+        // 죽이지 않고 스텝 마무리 시점에 사용자에게 핸드오프(tool 짝 보존)
+        paralysisHandoffNow = true;
+      } else if (paralysis === Math.floor(config.paralysisAbortRounds / 2) && !paralysisNudged) {
         paralysisNudged = true;
         paralysisNudgeNow = true;
-        console.log("  🌀 같은 계획 반복 감지 — 커밋하고 즉시 실행하도록 넛지합니다.");
+        console.log("  🌀 같은 계획 반복 감지 — 커밋하거나 ask_user로 물어보도록 넛지합니다.");
       }
     }
 
     if (toolCalls.length === 0) {
-      // 분석마비 넛지가 걸렸으면(도구 없음 → 짝 문제 없음) 바로 떠밀고 다음 스텝
+      // 분석마비 개입(도구 없음 → 짝 문제 없음): 핸드오프 우선, 그다음 넛지
+      if (paralysisHandoffNow) {
+        if (await handoffToUser()) return finish("paralysis_user_stop", content);
+        continue;
+      }
       if (paralysisNudgeNow) {
         session.history.push({ role: "user", content: PARALYSIS_NUDGE });
         continue;
@@ -319,8 +398,16 @@ export async function runLoop(
       session.history.push({ role: "tool", tool_call_id: call.id, content: result });
     }
 
-    // 도구 결과를 모두 넣은 뒤(짝 유지) 분석마비 넛지를 추가
-    if (paralysisNudgeNow) {
+    // ask_user로 사용자가 새 방향을 줬으면 분석마비 카운터를 리셋(새 국면 → 백지에서 재시작).
+    // 이렇게 안 하면 방금 물어봤는데 바로 또 핸드오프로 묻는 중복이 생긴다.
+    if (toolCalls.some((c) => c.function.name === "ask_user")) {
+      paralysis = 0;
+      paralysisNudged = false;
+      recentTranscripts.length = 0;
+    } else if (paralysisHandoffNow) {
+      // 도구 결과를 모두 넣은 뒤(짝 유지) 분석마비 개입: 핸드오프 우선, 그다음 넛지
+      if (await handoffToUser()) return finish("paralysis_user_stop", content);
+    } else if (paralysisNudgeNow) {
       session.history.push({ role: "user", content: PARALYSIS_NUDGE });
     }
   }
@@ -339,7 +426,8 @@ async function streamAssistant(session: Session): Promise<{
     {
       model: config.model,
       messages: session.history,
-      tools: session.tools,
+      // 도구가 없는 세션(챗봇 모드)은 tools 필드를 아예 빼서 순수 대화로 만든다.
+      ...(session.tools.length ? { tools: session.tools } : {}),
       temperature: config.temperature,
       frequency_penalty: config.frequencyPenalty,
       presence_penalty: config.presencePenalty,

@@ -92,6 +92,11 @@ export const config = {
   // mini-claude-code 프로젝트 루트 (스킬·하네스를 여기 하위에서 읽는다)
   projectRoot,
 
+  // 검증 게이트 명령 (예: "npm test", "npx tsc --noEmit && npm test").
+  // 설정되면 critic 루프가 이 명령의 '종료코드'로 성공/실패를 객관 판정한다.
+  // 미설정이면 게이트 비활성(모델 리뷰만) — 기존 동작 유지.
+  verifyCmd: process.env.MCC_VERIFY_CMD,
+
   // 에이전트 작업 루트 (도구 접근을 이 디렉터리로 제한)
   workdir: process.cwd(),
 

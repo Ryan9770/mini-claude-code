@@ -48,6 +48,20 @@ export async function confirm(summary: string): Promise<boolean> {
   return ans === "y" || ans === "yes";
 }
 
+// 사용자에게 번호 선택지를 제시하고 답을 받는다(모호할 때 HITL로 방향 결정).
+// 번호 선택 / '기타'(직접 입력) / 숫자 아닌 자유 입력 모두 허용.
+export async function askUserChoice(question: string, options: string[]): Promise<string> {
+  console.log(`\n🙋 ${question}`);
+  options.forEach((o, i) => console.log(`   ${i + 1}. ${o}`));
+  const other = options.length + 1;
+  console.log(`   ${other}. 기타(직접 입력)`);
+  const ans = (await rl.question(`  선택 [1-${other}] 또는 자유 입력: `)).trim();
+  const n = Number(ans);
+  if (Number.isInteger(n) && n >= 1 && n <= options.length) return options[n - 1];
+  if (Number.isInteger(n) && n === other) return (await rl.question("  직접 입력: ")).trim();
+  return ans; // 숫자가 아니면 그대로 자유 답변으로 취급
+}
+
 // 위험 명령 전용 승인. approve-all을 무시하고 항상 묻는다. 'yes'를 정확히 타이핑해야 실행.
 export async function confirmDangerous(cmd: string, why: string): Promise<boolean> {
   process.stdout.write(`\n  🚨 위험 명령 감지 — ${why}\n     ${cmd}\n`);

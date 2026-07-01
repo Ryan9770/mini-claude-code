@@ -1,10 +1,10 @@
-// 스킬 라우터: harness-100 같은 대규모 스킬 라이브러리를 '프롬프트 기반으로 동적 선택'한다.
+// 스킬 라우터: harness 같은 대규모 스킬 라이브러리를 '프롬프트 기반으로 동적 선택'한다.
 //
 // 왜 필요한가: 모든 스킬(수백 개)의 설명을 시스템 프롬프트에 주입하면 로컬 소형 모델이
 // 과부하(도구/스킬 오버로드)로 반복 붕괴한다. 그래서 매 작업마다 프롬프트를 읽어
 // 관련 스킬 상위 K개만 골라 노출한다(RAG over skills). v1은 인프라 없는 '어휘 검색'.
 //
-// 라이브러리 위치: 환경변수 MCC_SKILL_LIB. 미설정이면 프로젝트 안 harness-100/ko를
+// 라이브러리 위치: 환경변수 MCC_SKILL_LIB. 미설정이면 프로젝트 안 harness/ko를
 // 자동 감지하고, 그마저 없으면 라우터는 비활성(기존 동작 그대로 유지).
 //
 // 인덱스는 ~/.mcc/skills_index.json에 캐시하며, 라이브러리 경로가 바뀌면 재빌드한다.
@@ -22,10 +22,10 @@ export interface LibSkill {
 const mccDir = process.env.MCC_HOME ?? join(homedir(), ".mcc");
 const indexFile = join(mccDir, "skills_index.json");
 
-// 라이브러리 디렉터리 결정. 기본: 프로젝트 안 harness-100/ko. 미설정+미존재면 undefined → 라우터 비활성.
+// 라이브러리 디렉터리 결정. 기본: 프로젝트 안 harness/ko. 미설정+미존재면 undefined → 라우터 비활성.
 export function skillLibDir(): string | undefined {
   if (process.env.MCC_SKILL_LIB) return process.env.MCC_SKILL_LIB;
-  const inProject = join(config.projectRoot, "harness-100", "ko");
+  const inProject = join(config.projectRoot, "harness", "ko");
   return existsSync(inProject) ? inProject : undefined;
 }
 
