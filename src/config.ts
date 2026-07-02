@@ -1,6 +1,6 @@
 // 로컬 LLM 연결 및 에이전트 설정
 // Ollama / vLLM / LM Studio 모두 OpenAI 호환 엔드포인트를 제공하므로 baseURL만 바꾸면 됩니다.
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -9,6 +9,28 @@ import { dirname, join } from "node:path";
 // cwd는 에이전트 작업 디렉터리(도커선 /work)라 부적합하므로, 코드 위치를 기준으로 삼는다.
 // (dev: src/, 빌드: dist/, 도커: /app/dist — 모두 한 단계 위가 프로젝트 루트)
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// 경량 .env 로더(의존성 없음). API 키 등 비밀을 코드/compose 밖(.env, gitignore됨)에 두기 위함.
+// 이미 설정된 환경변수가 우선 — .env는 '없을 때만' 채운다(셸/Docker env를 덮지 않음).
+function loadDotEnv(dir: string): void {
+  try {
+    const p = join(dir, ".env");
+    if (!existsSync(p)) return;
+    for (const line of readFileSync(p, "utf-8").split("\n")) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const eq = t.indexOf("=");
+      if (eq === -1) continue;
+      const key = t.slice(0, eq).trim();
+      const val = t.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
+      if (key && process.env[key] === undefined) process.env[key] = val;
+    }
+  } catch {
+    /* 무시 */
+  }
+}
+loadDotEnv(projectRoot);
+if (process.cwd() !== projectRoot) loadDotEnv(process.cwd());
 
 // run_command가 사용할 셸 선택.
 // 윈도우 기본 cmd.exe는 bash 문법(mkdir -p, && 등)을 모르고 출력 인코딩(CP949)도 깨지므로,

@@ -12,6 +12,10 @@ services:
       MCC_BASE_URL: "http://10.1.10.111:8080/v1"
       MCC_MODEL: "gemma4-26b-a4b"
       MCC_CONTEXT_SIZE : 32768
+      MCC_REVIEW_PROVIDER: gemini
+      MCC_REVIEW_MODEL: gemini-2.5-pro
+      # 비밀은 여기 두지 않는다 — compose가 같은 폴더의 .env에서 치환한다(.env는 gitignore됨).
+      MCC_REVIEW_API_KEY: "${MCC_REVIEW_API_KEY:-}"
     volumes:
       # 에이전트 작업 결과를 호스트와 공유 (이 폴더만 노출됨)
       - ./workspace:/work
