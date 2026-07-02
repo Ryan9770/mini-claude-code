@@ -42,17 +42,18 @@ export const config = {
   // 로컬 서버는 키 검사를 안 하지만 SDK가 값을 요구함
   apiKey: process.env.MCC_API_KEY ?? "local",
 
-  // 한 작업당 에이전트 루프 최대 반복 횟수 (무한루프 방지)
-  maxSteps: 25,
+  // 한 작업당 에이전트 루프 최대 반복 횟수 (무한루프 방지).
+  // 대형 과제(수백 항목 일괄 처리)는 정당하게 더 필요할 수 있음 — MCC_MAX_STEPS로 조정.
+  maxSteps: Number(process.env.MCC_MAX_STEPS ?? 25),
 
   // 샘플링 파라미터.
   // temperature는 낮게(도구 호출 안정).
-  // frequencyPenalty: 0.4는 정당하게 반복돼야 할 토큰(파일명 등)까지 페널티를 줘서
-  // 'generate_pip_knows.py'가 'generate_pip_know스.final.py'처럼 손상되는 부작용이 관측됨
-  // (→ read_file 난사의 원인). 반복 붕괴는 스트림 내 isLooping 감지기가 별도로 잡으므로
-  // 페널티를 0.2로 낮춘다. MCC_FREQ_PENALTY로 조정 가능.
+  // frequencyPenalty: 기본 0. eval로 실증된 부작용 — 0.4에선 파일명 손상('know스.final'),
+  // 0.2에서도 긴 한국어 출력에서 반복 단어가 외국문자로 오염(토크나이저→토크نا이저, 프레임ワーク)돼
+  // edit_file 매칭 실패·붕괴 유발. freq=0 A/B: 오염 0줄·실패 0건(vs 0.2: 오염 有·실패 2건).
+  // 반복 붕괴는 스트림 isLooping 감지기가 별도로 잡으므로 페널티 불필요. MCC_FREQ_PENALTY로 조정.
   temperature: 0.3,
-  frequencyPenalty: Number(process.env.MCC_FREQ_PENALTY ?? 0.2),
+  frequencyPenalty: Number(process.env.MCC_FREQ_PENALTY ?? 0),
   presencePenalty: 0.0,
 
   // 한 응답의 최대 출력 토큰. 반복 루프·폭주가 무한정 길어지는 것을 하드 차단.
@@ -96,6 +97,33 @@ export const config = {
   // 설정되면 critic 루프가 이 명령의 '종료코드'로 성공/실패를 객관 판정한다.
   // 미설정이면 게이트 비활성(모델 리뷰만) — 기존 동작 유지.
   verifyCmd: process.env.MCC_VERIFY_CMD,
+
+  // ── 2티어 검증: 클라우드 리뷰어 (프로바이더 무관) ──────────────
+  // 생성은 로컬 모델, '리뷰(critic)'만 강한 클라우드 모델에 위탁한다.
+  // OpenAI·Google·Anthropic 모두 OpenAI 호환 엔드포인트를 제공하므로 baseURL만 다르다.
+  // 설정: MCC_REVIEW_PROVIDER(프리셋) 또는 MCC_REVIEW_BASE_URL + MCC_REVIEW_MODEL + MCC_REVIEW_API_KEY.
+  // 키 또는 모델이 없으면 비활성 → 기존처럼 로컬 모델이 리뷰(하위 호환).
+  reviewBaseURL: (() => {
+    if (process.env.MCC_REVIEW_BASE_URL) return process.env.MCC_REVIEW_BASE_URL;
+    const presets: Record<string, string> = {
+      gemini: "https://generativelanguage.googleapis.com/v1beta/openai/",
+      openai: "https://api.openai.com/v1",
+      anthropic: "https://api.anthropic.com/v1/",
+    };
+    return presets[(process.env.MCC_REVIEW_PROVIDER ?? "").toLowerCase()];
+  })(),
+  reviewModel: process.env.MCC_REVIEW_MODEL,
+  reviewApiKey: process.env.MCC_REVIEW_API_KEY,
+
+  // 평가(eval) 모드: 비대화형 배치 실행용. HITL 프롬프트를 자동 처리한다 —
+  // 일반 승인=자동 허용, 위험 명령=자동 거부, ask_user=자동 응답, 분석마비 핸드오프=중단.
+  evalMode: process.env.MCC_EVAL === "1",
+
+  // 어블레이션: 하네스 기능을 선택적으로 꺼서 기여도를 측정한다 (eval 전용).
+  // 쉼표 목록: antiflail(삽질 방지 규칙) / router(스킬 라우터 힌트) / paralysis(분석마비 감지)
+  ablate: new Set(
+    (process.env.MCC_ABLATE ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+  ),
 
   // 에이전트 작업 루트 (도구 접근을 이 디렉터리로 제한)
   workdir: process.cwd(),

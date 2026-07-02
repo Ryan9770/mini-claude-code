@@ -1,0 +1,6 @@
+{
+  "name": "hello-js",
+  "prompt": "현재 디렉터리에 hello.js 파일을 만들어라. 실행하면 정확히 EVAL_OK_7731 한 줄만 출력해야 한다. 만든 뒤 node hello.js로 실행해 출력을 확인하라.",
+  "checker": "check.cjs",
+  "timeoutSec": 300
+}

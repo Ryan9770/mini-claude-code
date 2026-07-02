@@ -2,9 +2,24 @@
 // 메인 에이전트의 spawn_subagent 도구가 이걸 호출한다. (생성-검증/전문가 풀 패턴의 토대)
 //
 // 에이전트 간 "통신"은 공유 파일시스템(workdir)을 통해 이뤄진다 — Ralph의 PROGRESS.md와 같은 원리.
+import OpenAI from "openai";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { createSession, runLoop, ANTI_FLAIL_RULES } from "./agent.js";
 import { toolSchemas } from "./tools.js";
+import { config } from "./config.js";
+
+// 2티어 검증: 리뷰어용 클라우드 클라이언트(설정된 경우에만). 생성은 로컬, 판단은 강한 모델.
+// OpenAI·Gemini·Anthropic 모두 OpenAI 호환 엔드포인트라 같은 SDK로 통한다.
+let reviewClient: OpenAI | null | undefined; // undefined=미초기화, null=비활성
+function getReviewRemote(): { client: OpenAI; model: string } | undefined {
+  if (reviewClient === undefined) {
+    reviewClient =
+      config.reviewBaseURL && config.reviewApiKey && config.reviewModel
+        ? new OpenAI({ baseURL: config.reviewBaseURL, apiKey: config.reviewApiKey })
+        : null;
+  }
+  return reviewClient ? { client: reviewClient, model: config.reviewModel! } : undefined;
+}
 
 // 읽기 전용 도구만 (탐색/리뷰 서브에이전트는 파일을 바꾸지 않는다)
 const READONLY_NAMES = new Set([
@@ -44,11 +59,20 @@ export async function runSubagent(type: string, task: string): Promise<string> {
   const role = (["explore", "code", "review"].includes(type) ? type : "code") as Role;
   const { prompt, tools } = ROLES[role];
 
-  console.log(`\n  ┌─── 🧩 서브에이전트[${role}] 시작 ───`);
+  // review 역할은 클라우드 리뷰어가 설정돼 있으면 그 모델로 실행(2티어 검증).
+  const remote = role === "review" ? getReviewRemote() : undefined;
+  console.log(
+    `\n  ┌─── 🧩 서브에이전트[${role}]${remote ? ` ☁️ ${remote.model}` : ""} 시작 ───`
+  );
   // 서브에이전트도 삽질 방지 규칙을 공유해야 한다(/critic·/ralph는 전부 서브에이전트로 도므로).
-  const session = createSession(`${prompt}\n\n${ANTI_FLAIL_RULES}`, tools, role);
+  const session = createSession(`${prompt}\n\n${ANTI_FLAIL_RULES}`, tools, role, remote);
   const result = await runLoop(session, task); // 텔레메트리 없음(메인만 기록)
   console.log(`  └─── 🧩 서브에이전트[${role}] 완료 ───\n`);
 
-  return result || `(서브에이전트[${role}]가 텍스트 결과를 반환하지 않음)`;
+  // 넛지 프로토콜("끝났다면 DONE")이 서브에이전트 안에서 발동하면 반환값이 'DONE' 한 단어가
+  // 되어 부모가 내용을 잃는다 → 요약 없는 DONE은 안내 문구로 대체(결과는 파일시스템에 있음).
+  if (!result || /^\s*DONE\s*[.!—-]*\s*$/i.test(result)) {
+    return `(서브에이전트[${role}]가 요약 없이 완료(DONE)만 반환함 — 변경 결과는 작업 디렉터리의 파일을 직접 확인하라)`;
+  }
+  return result;
 }

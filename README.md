@@ -96,6 +96,10 @@ MCC_BASE_URL=http://localhost:8080/v1 npm run dev
 | `MCC_FREQ_PENALTY` | `0.2` | frequency_penalty(너무 높으면 파일명 등 정당한 반복이 손상됨) |
 | `MCC_MAX_TOKENS` | `8192` | 한 응답 최대 출력 토큰(너무 작으면 긴 도구 인자가 잘려 JSON 깨짐) |
 | `MCC_VERIFY_CMD` | (없음) | Critic 검증 게이트 명령(예: `npx tsc --noEmit && npm test`). 종료코드로 성공 판정 |
+| `MCC_REVIEW_PROVIDER` | (없음) | 2티어 검증: 클라우드 리뷰어 프리셋 `gemini`/`openai`/`anthropic` (또는 `MCC_REVIEW_BASE_URL`로 커스텀) |
+| `MCC_REVIEW_MODEL` | (없음) | 리뷰어 모델명(예: `gemini-2.5-pro`, `gpt-4o`) — 키·모델 없으면 로컬 모델이 리뷰(기존 동작) |
+| `MCC_REVIEW_API_KEY` | (없음) | 리뷰어 API 키. **생성은 로컬 그대로, critic의 리뷰만 클라우드 강모델에 위탁** |
+| `MCC_MAX_STEPS` | `25` | 작업당 최대 루프 스텝(대형 일괄 작업은 상향) |
 | `MCC_HOME` | `~/.mcc` | 런타임 상태 저장(mcp.json·learnings·runs·인덱스 캐시) |
 
 > ⚠️ `MCC_CONTEXT_SIZE`가 서버 실제 컨텍스트보다 크면 400(컨텍스트 초과)이 납니다. 항상 일치시키세요.

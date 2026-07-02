@@ -1,0 +1,7 @@
+{
+  "name": "big-list",
+  "prompt": "현재 디렉터리의 pip_list.txt 파일을 읽고, 버전을 제외하고 각 패키지가 어떤 패키지인지 한 줄 설명을 붙인 big_knows.txt 파일을 만들어라. 형식은 '패키지명: 설명'. 항목이 많으니 도중에 끊기지 않게 주의하라.",
+  "checker": "check.cjs",
+  "timeoutSec": 600,
+  "env": { "MCC_MAX_STEPS": "50" }
+}

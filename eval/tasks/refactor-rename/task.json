@@ -1,0 +1,6 @@
+{
+  "name": "refactor-rename",
+  "prompt": "현재 디렉터리의 JS 프로젝트(lib.js, util.js, main.js)에서 함수 getData의 이름을 fetchData로 바꿔라. 모든 파일에서 빠짐없이 바꿔야 하며, 변경 후 node main.js가 여전히 정상 동작해야 한다. 실행해서 확인하라.",
+  "checker": "check.cjs",
+  "timeoutSec": 300
+}

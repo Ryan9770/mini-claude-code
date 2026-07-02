@@ -16,7 +16,8 @@ import { logRun, loadLearnings, type RunRecord } from "./evolve.js";
 import { runSubagent } from "./subagent.js"; // 런타임에서만 사용(순환 import 안전)
 
 // 시작 시 스킬 인덱스(name + description)만 노출 — 점진적 공개.
-const skills = getSkills();
+// ablation(skills) 시 로컬 스킬 목록도 프롬프트에서 제거(기여도 측정용).
+const skills = config.ablate.has("skills") ? [] : getSkills();
 const skillsSection = skills.length
   ? `\n\n[사용 가능한 스킬]\n` +
     skills.map((s) => `- ${s.name}: ${s.description}`).join("\n") +
@@ -53,9 +54,10 @@ const NOW_STR = (() => {
 
 // 삽질 방지 핵심 규칙 — 메인/서브에이전트 '모두'가 공유해야 하는 행동 규칙.
 // (서브에이전트는 BASE_SYSTEM_PROMPT가 아니라 자체 role 프롬프트를 쓰므로 별도 주입 필요)
-export const ANTI_FLAIL_RULES = `[삽질 방지 — 반드시 지켜라]
+// ablation(antiflail) 시 빈 문자열이 되어 메인·서브 모두에서 일관되게 빠진다.
+export const ANTI_FLAIL_RULES = config.ablate.has("antiflail") ? "" : `[삽질 방지 — 반드시 지켜라]
 - 값싼 검증 먼저(fail-fast): 수백 번 반복하는 스크립트나 비싼 작업 전에, 반드시 1건으로 먼저 시험하라. 예: pip show 하나를 먼저 실행해 실제로 설명이 나오는지 확인한 뒤 전체 루프를 돌려라.
-- 결과 품질을 확인하라: 파일을 만든 뒤 head/샘플로 내용을 직접 확인하라. 값이 대부분 동일하거나 무의미하면(예: 'No description available'만 반복) 실행이 성공해도 작업은 실패다 — 성공으로 선언하지 말고 접근을 바꿔라. '파일 생성됨'은 '작업 완료'가 아니다.
+- 결과 품질을 확인하라(단, 딱 1회): 파일을 만든 뒤 head/샘플로 내용을 한 번 확인하라. 값이 대부분 동일하거나 무의미하면(예: 'No description available'만 반복) 실행이 성공해도 작업은 실패다 — 접근을 바꿔라. '파일 생성됨'은 '작업 완료'가 아니다. ⚠️ 확인은 한 번이면 충분하다: 확인 결과가 기대와 일치하면 그 즉시 완료로 보고하라. 같은 출력을 두 번 이상 재확인하거나 글자 하나하나를 의심하며 다시 읽지 마라 — 그것이 삽질이다.
 - 한 접근에 커밋하라: 같은 결정(어떤 방법을 쓸지)을 반복해서 다시 논의하지 마라. 이미 만든 스크립트를 조금씩 바꿔 새로 쓰지 마라(v2, v3 …). 방법 하나를 골라 끝까지 실행하고, 안 되면 근본 원인을 바꿔라.
 - 도구가 안 되면 방식을 바꿔라: 로컬에 설치 안 된 패키지에 pip show가 안 되듯, 도구가 빈 결과를 주면 같은 도구를 반복하지 말고 다른 수단(예: 네 자체 지식)으로 전환하라.
 - 모호하면 물어라: 용어의 뜻·자료 위치·사용자가 원하는 방향이 불분명하면, 추측하거나 같은 고민을 반복하지 말고 즉시 ask_user 도구로 사용자에게 번호 선택지를 제시해 물어라. 혼자 헤매는 것보다 한 번 묻는 게 낫다.
@@ -113,14 +115,23 @@ export interface Session {
   history: ChatCompletionMessageParam[];
   tools: ChatCompletionTool[];
   label: string;
+  client?: OpenAI; // 세션 전용 클라이언트(예: 클라우드 리뷰어). 없으면 로컬 기본.
+  model?: string; // 세션 전용 모델명(client와 함께 지정)
 }
 
 export function createSession(
   systemPrompt: string = BASE_SYSTEM_PROMPT,
   tools: ChatCompletionTool[] = toolSchemas,
-  label = "main"
+  label = "main",
+  remote?: { client: OpenAI; model: string }
 ): Session {
-  return { history: [{ role: "system", content: systemPrompt }], tools, label };
+  return {
+    history: [{ role: "system", content: systemPrompt }],
+    tools,
+    label,
+    client: remote?.client,
+    model: remote?.model,
+  };
 }
 
 // 메인 대화 세션 (기본 도구 + 서브에이전트 위임 도구). MCP 도구는 startup에서 추가됨.
@@ -220,7 +231,7 @@ export async function runLoop(
   // 프롬프트를 읽고 관련 스킬(harness 등)만 동적으로 골라 이 턴에 주입한다.
   // (전체 주입 시 소형 모델이 과부하로 붕괴하므로 상위 K개만. 관련 없으면 빈 문자열)
   // Gemma 등 system 역할이 없는 템플릿과의 호환을 위해 별도 메시지가 아닌 user 턴에 덧붙인다.
-  const hint = skillHint(userInput);
+  const hint = config.ablate.has("router") ? "" : skillHint(userInput);
   session.history.push({ role: "user", content: userInput + hint });
   await maybeCompress(session);
 
@@ -241,6 +252,11 @@ export async function runLoop(
   // 분석마비 최종 방어선: 스스로 못 풀면 죽이지 않고 사용자에게 넘긴다(HITL).
   // true 반환 시 호출부가 작업을 종료한다. false면 사용자 지시를 주입하고 계속.
   const handoffToUser = async (): Promise<boolean> => {
+    if (config.evalMode) {
+      // 평가 모드: 사용자가 없으므로 핸드오프 대신 중단(outcome=paralysis로 기록됨)
+      console.log(`\n🌀 분석마비 — 평가 모드이므로 중단합니다.`);
+      return true;
+    }
     console.log(`\n🌀 분석마비 — 진전이 없어 사용자에게 넘깁니다.`);
     const choice = await askUserChoice(
       "계속 같은 고민을 반복하고 있어요. 어떻게 진행할까요?",
@@ -322,7 +338,7 @@ export async function runLoop(
     // tool_call↔tool 짝을 깨지 않도록, 중단은 즉시 하되 넛지는 '스텝 마무리 시점'에만 넣는다.
     let paralysisNudgeNow = false;
     let paralysisHandoffNow = false;
-    {
+    if (!config.ablate.has("paralysis")) {
       const sim = maxSimilarity(transcript, recentTranscripts);
       recentTranscripts.push(transcript);
       if (recentTranscripts.length > 3) recentTranscripts.shift();
@@ -358,7 +374,7 @@ export async function runLoop(
           content:
             "방금 말한 작업을 지금 바로 도구로 실행하라(write_file/run_command 등). " +
             "더 이상 설명하거나 다음 단계를 예고하지 마라. " +
-            "정말로 모든 작업이 끝났다면 'DONE'이라고만 답하라.",
+            "정말로 모든 작업이 끝났다면 'DONE'과 함께 무엇을 했는지 한 줄 요약을 답하라(예: DONE — hello.js 생성, 실행 확인 완료).",
         });
         continue;
       }
@@ -437,15 +453,24 @@ async function streamAssistant(session: Session): Promise<{
   transcript: string; // 사고(reasoning)+본문 합본 — 스텝 간 분석마비 감지에 사용
 }> {
   const signal = activeSignal();
-  const stream = await client.chat.completions.create(
+  // 세션 전용 클라이언트/모델이 있으면 그것으로(클라우드 리뷰어), 없으면 로컬 기본.
+  const llm = session.client ?? client;
+  const isRemote = !!session.client;
+  const stream = await llm.chat.completions.create(
     {
-      model: config.model,
+      model: session.model ?? config.model,
       messages: session.history,
       // 도구가 없는 세션(챗봇 모드)은 tools 필드를 아예 빼서 순수 대화로 만든다.
       ...(session.tools.length ? { tools: session.tools } : {}),
       temperature: config.temperature,
-      frequency_penalty: config.frequencyPenalty,
-      presence_penalty: config.presencePenalty,
+      // 페널티는 로컬 Q4 모델 보정용. 원격(클라우드)엔 보내지 않는다 —
+      // Gemini 호환 엔드포인트는 frequency_penalty 필드 자체를 400으로 거부한다.
+      ...(isRemote
+        ? {}
+        : {
+            frequency_penalty: config.frequencyPenalty,
+            presence_penalty: config.presencePenalty,
+          }),
       max_tokens: config.maxResponseTokens, // 한 응답이 무한정 길어지는 것을 하드 차단
       stream: true,
     },

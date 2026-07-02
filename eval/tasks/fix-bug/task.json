@@ -1,0 +1,6 @@
+{
+  "name": "fix-bug",
+  "prompt": "현재 디렉터리의 calc.js에 버그가 있다. node calc.js 실행 결과가 SUM=15가 되도록 버그를 고치고, 실행해서 확인하라.",
+  "checker": "check.cjs",
+  "timeoutSec": 300
+}

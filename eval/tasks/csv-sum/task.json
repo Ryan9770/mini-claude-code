@@ -1,0 +1,6 @@
+{
+  "name": "csv-sum",
+  "prompt": "현재 디렉터리의 records.csv에서 amount 열의 합계를 구해 total.txt 파일에 'TOTAL=<합계>' 형식 한 줄로 저장하라. 빈 값은 0으로 취급한다. 정확해야 한다.",
+  "checker": "check.cjs",
+  "timeoutSec": 300
+}

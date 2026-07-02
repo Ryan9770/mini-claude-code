@@ -2,13 +2,15 @@
 node_modules/
 dist/
 harness/*
-skills/*
 bench/*
 
 # 에이전트 작업 산출물 / 테스트 잔여물
 workspace/
 PROGRESS.md
 hello.py
+
+# eval 실행 결과(임시 워크스페이스·기록)
+eval/.runs/
 
 # 백업 / 임시
 *.bak

@@ -1,0 +1,11 @@
+id,name,amount,category
+1,alpha,120.50,A
+2,bravo,89.25,B
+3,charlie,-15.75,A
+4,delta,,C
+5,echo,200,B
+6,foxtrot,33.33,A
+7,golf,-8.08,C
+8,hotel,450.00,B
+9,india,,A
+10,juliet,75.75,C
