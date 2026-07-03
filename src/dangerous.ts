@@ -18,11 +18,12 @@ const DANGER: { re: RegExp; why: string }[] = [
   { re: /\brm\s+-[a-zA-Z]*r/, why: "재귀 삭제(rm -r)" },
   { re: /\brm\s+-[a-zA-Z]*f/, why: "강제 삭제(rm -f)" },
   { re: /\brm\b[^\n]*--(recursive|force)/, why: "rm --recursive/--force" },
-  { re: /\bgit\s+push\b[^\n]*(--force|-f\b|\+)/, why: "git 강제 푸시" },
+  // NOTE: git push는 여기서 일괄 '위험'으로 잡지 않는다 — tools.ts의 gitPushGate가
+  // 전담(비밀 스캔·강제 차단·기본브랜치 차단·검증). 여기서 danger로 잡으면 eval 모드가
+  // 게이트 도달 전에 자동 거부해버려 "게이트 통과 시 자율 푸시"가 동작하지 않는다.
   { re: /\bgit\s+reset\s+--hard/, why: "git reset --hard(로컬 변경 손실)" },
   { re: /\bgit\s+clean\s+-[a-zA-Z]*f/, why: "git clean(미추적 파일 삭제)" },
   { re: /\bgit\s+checkout\s+--\s/, why: "git checkout --(변경 폐기)" },
-  { re: /\bgit\s+push\b/, why: "git push(원격에 반영)" },
   { re: /\bsudo\b/, why: "권한 상승(sudo)" },
   { re: /\bchmod\s+-R\b/, why: "재귀 권한 변경" },
   { re: /\bchown\s+-R\b/, why: "재귀 소유자 변경" },

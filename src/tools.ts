@@ -293,6 +293,80 @@ function safePath(p: string): string {
   return abs;
 }
 
+// ── edit_file 회복력 ─────────────────────────────────────────────
+// 약한 모델의 최대 실패 원인: old_string을 '읽지 않고 환각'해서 매칭 실패 → 삽질.
+// eval(refactor-rename)에서 직접 측정된 병목. 아래 두 장치로 대응한다:
+//  (1) 공백 관용 매칭 — 들여쓰기·줄바꿈 양만 다르면 실제 텍스트에 재매칭해 '성공'시킴.
+//  (2) 실패 시 진짜 파일 내용을 돌려줌 — 모델이 환각 대신 실물을 보고 재시도하게 한다.
+// MCC_ABLATE=editfix로 끄면 예전의 짧은 오류만 반환(기여도 측정용).
+
+function editTrigrams(s: string): Set<string> {
+  const t = s.toLowerCase();
+  const g = new Set<string>();
+  for (let i = 0; i < t.length - 2; i++) g.add(t.slice(i, i + 3));
+  return g;
+}
+// 겹침 계수(0~1): 짧은 쪽 기준이라 길이 차이에 관대. 앵커 줄 찾기에 사용.
+function editSim(a: string, b: string): number {
+  const A = editTrigrams(a), B = editTrigrams(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const g of A) if (B.has(g)) inter++;
+  return inter / Math.min(A.size, B.size);
+}
+
+// 공백(들여쓰기/줄바꿈)의 '양'만 다른 경우를 관용해 실제 매칭 구간을 찾는다.
+// 비공백 토큰은 순서·내용이 정확히 일치해야 하므로 오매칭 위험은 낮다.
+// 정확히 1곳일 때만 성공 처리(모호하면 null → 상위에서 다중발생으로 안내).
+function whitespaceTolerantMatch(original: string, needle: string): { start: number; end: number } | null {
+  const tokens = needle.trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return null;
+  const pattern = tokens.map((tok) => tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
+  let rx: RegExp;
+  try { rx = new RegExp(pattern, "g"); } catch { return null; }
+  const matches = [...original.matchAll(rx)];
+  if (matches.length !== 1) return null;
+  const m = matches[0];
+  return { start: m.index!, end: m.index! + m[0].length };
+}
+
+// 매칭 실패 시 '진짜 파일'을 보여준다. 작으면 전체(줄번호), 크면 가장 근접한 창.
+function editReality(original: string, needle: string): string {
+  const lines = original.split("\n");
+  const num = (arr: string[], base: number) =>
+    arr.map((l, i) => `${String(base + i + 1).padStart(4)}| ${l}`).join("\n");
+  if (lines.length <= 80) {
+    return `\n── 실제 파일 내용(${lines.length}줄) — 이걸 보고 old_string을 정확히 복사하라 ──\n${num(lines, 0)}`;
+  }
+  const anchor = needle.split("\n").map((l) => l.trim()).filter(Boolean)
+    .sort((a, b) => b.length - a.length)[0] ?? "";
+  let best = -1, bestScore = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const s = editSim(lines[i].trim(), anchor);
+    if (s > bestScore) { bestScore = s; best = i; }
+  }
+  if (best < 0 || bestScore < 0.3) {
+    return `\n(파일 ${lines.length}줄 — old_string과 유사한 구간을 못 찾음. read_file로 실제 내용을 먼저 확인하라)`;
+  }
+  const from = Math.max(0, best - 6), to = Math.min(lines.length, best + 7);
+  return `\n── 실제 파일에서 가장 근접한 구간(${from + 1}~${to}줄) — 여기서 정확히 복사하라 ──\n${num(lines.slice(from, to), from)}`;
+}
+
+// count>1: 각 발생의 줄번호를 보여 '더 긴 문맥'을 넣도록 구체적으로 돕는다.
+function editOccurrences(original: string, needle: string): string {
+  const idxs: number[] = [];
+  let from = 0;
+  while (true) {
+    const i = original.indexOf(needle, from);
+    if (i === -1) break;
+    idxs.push(i);
+    from = i + needle.length;
+  }
+  const lineOf = (i: number) => original.slice(0, i).split("\n").length;
+  const locs = idxs.map((i) => `${lineOf(i)}줄`).join(", ");
+  return `\n발생 위치: ${locs}. 각 위치가 구별되도록 앞뒤 줄을 더 포함하라.`;
+}
+
 // 탐색에서 제외할 디렉터리 (속도·노이즈 방지)
 const IGNORE_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".venv", "__pycache__", ".cache",
@@ -321,6 +395,73 @@ function globToRegex(glob: string): RegExp {
     }
   }
   return new RegExp("^" + re + "$");
+}
+
+// ── git push 사전 게이트 ─────────────────────────────────────────
+// 정책: "게이트 통과 시 자율" — 통과하면 확인 없이 밀고, 실패하면 밀지 않고 이유를 반환.
+// 약한 로컬 모델의 자율 푸시 리스크(비밀 유출·깨진 코드·강제푸시·기본브랜치 직접푸시)를 막는다.
+// 우회 escape: MCC_ALLOW_FORCE=1, MCC_ALLOW_MAIN=1. 측정용 무력화: MCC_ABLATE=gitgate.
+
+// diff의 '추가된 줄(+)'에서만 찾는 비밀 패턴(기존 코드 오탐 최소화).
+const SECRET_PATTERNS: [RegExp, string][] = [
+  [/AIza[0-9A-Za-z_\-]{35}/, "Google API 키"],
+  [/AKIA[0-9A-Z]{16}/, "AWS 액세스 키"],
+  [/\bsk-[A-Za-z0-9]{20,}/, "OpenAI 키"],
+  [/\bgh[pousr]_[A-Za-z0-9]{20,}/, "GitHub 토큰"],
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}/, "Slack 토큰"],
+  [/-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/, "개인키 블록"],
+  [/(?:api[_-]?key|secret|token|passwd|password)\s*[:=]\s*["'][A-Za-z0-9_\-]{16,}["']/i, "하드코딩된 비밀값"],
+];
+
+function isGitPush(command: string): boolean {
+  return /\bgit\s+push\b/.test(command);
+}
+
+async function sh(command: string): Promise<{ out: string; code: boolean }> {
+  const { stdout, stderr } = await runCommand(command, activeSignal());
+  // runCommand는 실패해도 reject 안 하므로 stderr로 대략 판정(정밀 판정은 별도 명령으로)
+  return { out: (stdout + stderr).trim(), code: !/fatal:|error:/i.test(stderr) };
+}
+
+// 통과면 null, 막으면 '왜 막혔는지(+어떻게 고칠지)'를 반환한다.
+async function gitPushGate(command: string): Promise<string | null> {
+  if (config.ablate.has("gitgate")) return null;
+
+  // (1) 강제 푸시 차단(--force-with-lease는 안전하므로 허용)
+  if (/(--force\b(?!-with-lease)|(?:^|\s)-f(?:\s|$))/.test(command) && process.env.MCC_ALLOW_FORCE !== "1") {
+    return "🚫 푸시 차단: 강제 푸시(--force/-f)는 히스토리를 파괴할 수 있어 금지된다. "
+      + "필요하면 --force-with-lease를 쓰거나, 정말 의도했다면 사용자에게 MCC_ALLOW_FORCE=1을 요청하라.";
+  }
+
+  // (2) 기본 브랜치 직접 푸시 차단 → 피처 브랜치 권장
+  const branch = (await sh("git rev-parse --abbrev-ref HEAD")).out.split("\n").pop()?.trim() ?? "";
+  if (/^(main|master)$/.test(branch) && process.env.MCC_ALLOW_MAIN !== "1") {
+    return `🚫 푸시 차단: 기본 브랜치(${branch})에 직접 푸시 금지. `
+      + `'git switch -c feature/<이름>'으로 피처 브랜치를 만들어 거기서 커밋·푸시하라.`;
+  }
+
+  // (3) 밀려는 커밋 범위의 diff에서 비밀 스캔(추가된 줄만)
+  const hasUp = (await sh("git rev-parse --abbrev-ref --symbolic-full-name @{u}")).code;
+  const diffCmd = hasUp ? "git diff @{u}..HEAD" : "git log -p --no-color -n 30";
+  const diff = (await sh(diffCmd)).out;
+  const added = diff.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).join("\n");
+  for (const [rx, label] of SECRET_PATTERNS) {
+    if (rx.test(added)) {
+      return `🚫 푸시 차단: 커밋에 비밀로 보이는 값(${label})이 있다. `
+        + `절대 푸시하지 마라. 해당 값을 .env 등으로 빼고(코드/커밋에서 제거), `
+        + `이미 커밋됐다면 히스토리에서 지운 뒤 다시 시도하라.`;
+    }
+  }
+
+  // (4) 검증 게이트가 설정돼 있으면 테스트 초록일 때만 푸시
+  if (config.verifyCmd) {
+    const v = await runVerify();
+    if (v && !v.ok) {
+      return `🚫 푸시 차단: 검증 명령 실패 → 깨진 코드를 밀 수 없다.\n${v.output.slice(0, 1500)}`;
+    }
+  }
+
+  return null; // 모든 게이트 통과 → 자율 푸시 허용
 }
 
 // workdir 하위 파일을 재귀적으로 순회 (IGNORE_DIRS 제외)
@@ -560,12 +701,32 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
       case "edit_file": {
         const p = safePath(args.path);
         const original = await readFile(p, "utf-8");
+        const fix = !config.ablate.has("editfix");
         const count = original.split(args.old_string).length - 1;
-        if (count === 0) return `오류: old_string을 찾지 못함`;
-        if (count > 1) return `오류: old_string이 ${count}곳에서 발견됨(유일해야 함). 더 긴 문맥을 포함하라.`;
-        const updated = original.replace(args.old_string, args.new_string);
-        await writeFile(p, updated, "utf-8");
-        return `OK: ${args.path} 수정됨` + (await diagnose(p, updated));
+
+        if (count === 1) {
+          const updated = original.replace(args.old_string, args.new_string);
+          await writeFile(p, updated, "utf-8");
+          return `OK: ${args.path} 수정됨` + (await diagnose(p, updated));
+        }
+        if (count > 1) {
+          return `오류: old_string이 ${count}곳에서 발견됨(유일해야 함). 더 긴 문맥을 포함하라.`
+            + (fix ? editOccurrences(original, args.old_string) : "");
+        }
+        // count === 0: 정확히 못 찾음.
+        if (fix) {
+          // (1) 공백 차이만이면 실제 텍스트에 재매칭해 그대로 성공시킨다.
+          const m = whitespaceTolerantMatch(original, args.old_string);
+          if (m) {
+            const updated = original.slice(0, m.start) + args.new_string + original.slice(m.end);
+            await writeFile(p, updated, "utf-8");
+            return `OK: ${args.path} 수정됨(공백 차이 자동 보정)` + (await diagnose(p, updated));
+          }
+          // (2) 그래도 못 찾으면 진짜 파일 내용을 돌려줘 환각을 끊는다.
+          return `오류: old_string을 찾지 못함. 아래 실제 내용과 정확히 일치시켜라.`
+            + editReality(original, args.old_string);
+        }
+        return `오류: old_string을 찾지 못함`;
       }
       case "list_dir": {
         const dir = safePath(args.path ?? ".");
@@ -615,6 +776,12 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         return out.length ? out.join("\n") : "(일치 없음)";
       }
       case "run_command": {
+        // git push는 사전 게이트(비밀·강제·기본브랜치·검증)를 통과할 때만 실행한다.
+        // 통과=자율 푸시, 실패=푸시 안 하고 이유 반환(모델이 고치도록).
+        if (isGitPush(args.command)) {
+          const blocked = await gitPushGate(args.command);
+          if (blocked) return blocked;
+        }
         // Ctrl+C 시 실행 중인 명령의 프로세스 트리 전체를 종료(손자 프로세스 포함)
         const { stdout, stderr } = await runCommand(args.command, activeSignal());
         return `[stdout]\n${stdout}\n[stderr]\n${stderr}`.slice(0, 20_000);
