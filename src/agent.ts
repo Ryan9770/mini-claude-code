@@ -463,14 +463,16 @@ async function streamAssistant(session: Session): Promise<{
       // 도구가 없는 세션(챗봇 모드)은 tools 필드를 아예 빼서 순수 대화로 만든다.
       ...(session.tools.length ? { tools: session.tools } : {}),
       temperature: config.temperature,
-      // 페널티는 로컬 Q4 모델 보정용. 원격(클라우드)엔 보내지 않는다 —
-      // Gemini 호환 엔드포인트는 frequency_penalty 필드 자체를 400으로 거부한다.
+      // 페널티·min_p는 로컬 Q4 모델 보정용(다국어 오염 억제). 원격(클라우드)엔 보내지 않는다 —
+      // Gemini 호환 엔드포인트는 frequency_penalty/min_p 같은 비표준 필드를 400으로 거부한다.
       ...(isRemote
         ? {}
-        : {
+        : ({
             frequency_penalty: config.frequencyPenalty,
             presence_penalty: config.presencePenalty,
-          }),
+            // min_p: OpenAI 표준 아님(llama.cpp 확장). SDK 타입엔 없으므로 스프레드로 주입.
+            ...(config.minP > 0 ? { min_p: config.minP } : {}),
+          } as Record<string, unknown>)),
       max_tokens: config.maxResponseTokens, // 한 응답이 무한정 길어지는 것을 하드 차단
       stream: true,
     },

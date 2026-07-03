@@ -68,13 +68,15 @@ export const config = {
   // 대형 과제(수백 항목 일괄 처리)는 정당하게 더 필요할 수 있음 — MCC_MAX_STEPS로 조정.
   maxSteps: Number(process.env.MCC_MAX_STEPS ?? 25),
 
-  // 샘플링 파라미터.
-  // temperature는 낮게(도구 호출 안정).
-  // frequencyPenalty: 기본 0. eval로 실증된 부작용 — 0.4에선 파일명 손상('know스.final'),
-  // 0.2에서도 긴 한국어 출력에서 반복 단어가 외국문자로 오염(토크나이저→토크نا이저, 프레임ワーク)돼
-  // edit_file 매칭 실패·붕괴 유발. freq=0 A/B: 오염 0줄·실패 0건(vs 0.2: 오염 有·실패 2건).
+  // 샘플링 파라미터. 에이전트 코딩은 창의성보다 '정확·결정성'이 중요하므로 좁게 잡는다.
+  // temperature 낮음 + min_p(꼬리 컷)로 다국어 오염(Q4 blur가 꼬리의 외국문자 토큰을
+  // 뽑는 현상: 토크나이저→토크نا이저, (a,б)/(a,బ))을 근본적으로 억제한다.
+  temperature: Number(process.env.MCC_TEMPERATURE ?? 0.15),
+  // min_p: 최상위 토큰 확률 대비 이 비율 미만인 후보를 잘라낸다(llama.cpp 확장 파라미터).
+  // 외국문자 토큰은 대개 확률이 낮은 꼬리라 여기서 걸러진다. 0이면 비활성.
+  minP: Number(process.env.MCC_MIN_P ?? 0.1),
+  // frequencyPenalty: 기본 0. eval 실증 — 0.4에선 파일명 손상('know스.final'), 0.2에서도 오염.
   // 반복 붕괴는 스트림 isLooping 감지기가 별도로 잡으므로 페널티 불필요. MCC_FREQ_PENALTY로 조정.
-  temperature: 0.3,
   frequencyPenalty: Number(process.env.MCC_FREQ_PENALTY ?? 0),
   presencePenalty: 0.0,
 
@@ -143,6 +145,7 @@ export const config = {
 
   // 어블레이션: 하네스 기능을 선택적으로 꺼서 기여도를 측정한다 (eval 전용).
   // 쉼표 목록: antiflail(삽질 방지 규칙) / router(스킬 라우터 힌트) / paralysis(분석마비 감지)
+  //          / skills(로컬 스킬 목록) / lsp(쓰기 후 문법 진단 첨부)
   ablate: new Set(
     (process.env.MCC_ABLATE ?? "").split(",").map((s) => s.trim()).filter(Boolean)
   ),

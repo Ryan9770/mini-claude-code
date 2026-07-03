@@ -207,6 +207,81 @@ async function fetchUrl(url: string): Promise<string> {
   return text.slice(0, 15_000) || "(빈 응답)";
 }
 
+// ── LSP 경량 진단: 쓰기/편집 직후 파일 문법 검사를 도구 결과에 첨부 ──────
+// 약한 모델이 방금 깨뜨린 것을 '즉시' 보고 고치게 한다(opencode의 LSP 통합 경량판).
+// JS/TS는 TypeScript API로(프로세스 없이 정확), Python은 syntax compile, JSON은 파싱.
+// MCC_ABLATE=lsp로 끌 수 있어 eval에서 기여도 측정 가능.
+let tsCache: any | null | undefined; // undefined=미시도, null=미설치
+async function loadTs(): Promise<any | null> {
+  if (tsCache === undefined) {
+    try {
+      const m: any = await import("typescript");
+      tsCache = m.default ?? m;
+    } catch {
+      tsCache = null; // typescript 없으면 JS/TS 진단만 조용히 생략
+    }
+  }
+  return tsCache;
+}
+
+// python으로 파일 문법만 검사(실행 아님, pyc 안 남김). 오류 시 메시지, 정상/불가 시 "".
+function pyCheck(absPath: string): Promise<string> {
+  return new Promise((res) => {
+    const py = process.platform === "win32" ? "python" : "python3";
+    let child;
+    try {
+      child = spawn(py, ["-c", "import sys; f=sys.argv[1]; compile(open(f,encoding='utf-8').read(), f, 'exec')", absPath], { windowsHide: true });
+    } catch {
+      return res("");
+    }
+    let err = "";
+    child.stderr?.on("data", (d) => (err += d.toString()));
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* 무시 */ }
+      res("");
+    }, 8000);
+    child.on("error", () => { clearTimeout(timer); res(""); });
+    child.on("close", (code) => { clearTimeout(timer); res(code === 0 ? "" : err.trim().slice(-400)); });
+  });
+}
+
+const JS_EXT = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"]);
+
+async function diagnose(absPath: string, source: string): Promise<string> {
+  if (config.ablate.has("lsp")) return "";
+  try {
+    const ext = absPath.slice(absPath.lastIndexOf(".")).toLowerCase();
+    if (ext === ".json") {
+      try { JSON.parse(source); return ""; }
+      catch (e: any) { return `\n[진단] JSON 오류: ${String(e?.message ?? e).slice(0, 140)}`; }
+    }
+    if (JS_EXT.has(ext)) {
+      const ts = await loadTs();
+      if (!ts) return "";
+      const out = ts.transpileModule(source, {
+        reportDiagnostics: true,
+        fileName: absPath,
+        compilerOptions: { noEmit: true, allowJs: true },
+      });
+      const errs = out.diagnostics ?? [];
+      if (!errs.length) return "";
+      const items = errs.slice(0, 5).map((d: any) => {
+        const pos = d.file && d.start != null ? d.file.getLineAndCharacterOfPosition(d.start) : null;
+        const at = pos ? ` (line ${pos.line + 1})` : "";
+        return `  - ${ts.flattenDiagnosticMessageText(d.messageText, " ")}${at}`;
+      });
+      return `\n[진단] 문법 오류 ${errs.length}건 — 지금 고쳐라:\n${items.join("\n")}`;
+    }
+    if (ext === ".py") {
+      const e = await pyCheck(absPath);
+      return e ? `\n[진단] 파이썬 문법 오류 — 지금 고쳐라:\n${e}` : "";
+    }
+  } catch {
+    /* 진단은 보조 — 실패해도 도구를 막지 않는다 */
+  }
+  return "";
+}
+
 // 경로가 허용 루트(작업 디렉터리 또는 스킬 디렉터리) 밖으로 나가지 못하게 제한.
 function safePath(p: string): string {
   const abs = isAbsolute(p) ? p : resolve(config.workdir, p);
@@ -460,7 +535,7 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         const p = safePath(args.path);
         await mkdir(dirname(p), { recursive: true }); // 상위 디렉터리 자동 생성
         await writeFile(p, args.content, "utf-8");
-        return `OK: ${args.path} (${args.content.length} bytes)`;
+        return `OK: ${args.path} (${args.content.length} bytes)` + (await diagnose(p, args.content));
       }
       case "make_dir": {
         await mkdir(safePath(args.path), { recursive: true });
@@ -488,8 +563,9 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         const count = original.split(args.old_string).length - 1;
         if (count === 0) return `오류: old_string을 찾지 못함`;
         if (count > 1) return `오류: old_string이 ${count}곳에서 발견됨(유일해야 함). 더 긴 문맥을 포함하라.`;
-        await writeFile(p, original.replace(args.old_string, args.new_string), "utf-8");
-        return `OK: ${args.path} 수정됨`;
+        const updated = original.replace(args.old_string, args.new_string);
+        await writeFile(p, updated, "utf-8");
+        return `OK: ${args.path} 수정됨` + (await diagnose(p, updated));
       }
       case "list_dir": {
         const dir = safePath(args.path ?? ".");
