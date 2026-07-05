@@ -197,7 +197,14 @@ export async function runChat(userInput: string): Promise<string> {
 
 // 의도 분류: 이 메시지가 도구·파일시스템이 필요한 '에이전트' 작업인지 '순수 대화'인지.
 // auto 모드 라우팅에 사용. 분류 실패 시 안전하게 agent(기존 동작)로 폴백.
+// 결정적 fast-path: 명백한 '행동' 요청은 약한 모델의 분류(오분류 잦음)에 맡기지 않고 즉시 AGENT.
+// 실전 버그: "hello.txt 만들고 커밋·push해줘"가 CHAT으로 오분류돼 "컴퓨터 접근 못함"을 답했음.
+// 비대칭 비용: 행동→CHAT 오분류(작업 거부)가 개념질문→AGENT 오분류(그냥 답함)보다 훨씬 해롭다 → AGENT로 편향.
+const AGENT_ACTION_RE =
+  /커밋|푸시|브랜치|머지|스테이징|만들어|생성|작성|수정|고쳐|편집|삭제|지워|실행|돌려|빌드|리팩터|리팩토링|구현|\bgit\b|\bcommit\b|\bpush\b|\bbranch\b|\bmerge\b|\bpull\b|\bclone\b|\brun\b|\bbuild\b|\bnpm\b|\bnode\b|\btsc\b/i;
+
 export async function classifyIntent(userInput: string): Promise<"agent" | "chat"> {
+  if (AGENT_ACTION_RE.test(userInput)) return "agent"; // 명백한 행동 요청 → LLM 분류 건너뜀
   try {
     const res = await client.chat.completions.create({
       model: config.model,
