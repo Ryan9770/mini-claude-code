@@ -285,7 +285,7 @@ async function diagnose(absPath: string, source: string): Promise<string> {
 }
 
 // 경로가 허용 루트(작업 디렉터리 또는 스킬 디렉터리) 밖으로 나가지 못하게 제한.
-function safePath(p: string): string {
+export function safePath(p: string): string {
   const abs = isAbsolute(p) ? p : resolve(config.workdir, p);
   const roots = [config.workdir, skillsDir()];
   const allowed = roots.some((root) => !relative(root, abs).startsWith(".."));

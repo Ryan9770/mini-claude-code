@@ -11,6 +11,7 @@ import { runSubagent } from "./subagent.js";
 import { runVerify } from "./tools.js";
 import { isAborted } from "./io.js";
 import { config } from "./config.js";
+import { compressDiagnostic } from "./diagnostic.js";
 
 // auto-gate: 검증 명령이 없을 때, 구현에 앞서 모델이 '성공 조건 체크 스크립트'를 스스로 작성하게 한다(TDD식).
 // 파일명은 반드시 gate_check.mjs — .js면 채점기의 getData 스캔과 충돌하므로 .mjs로 격리한다.
@@ -76,7 +77,7 @@ export async function buildWithCritic(task: string, rounds = 2): Promise<void> {
         "code",
         `검증 명령(\`${config.verifyCmd}\`)이 실패했다. 아래 '실제 오류 출력'을 보고 원인을 고쳐라. ` +
           `추측하지 말고 오류 메시지가 가리키는 곳을 직접 확인해 수정하라.\n\n` +
-          `[원래 요구사항]\n${task}\n\n[검증 오류 출력]\n${verify.output}`
+          `[원래 요구사항]\n${task}\n\n[검증 오류 출력]\n${compressDiagnostic(verify.output)}`
       );
       continue; // 다음 라운드에서 재검증
     }

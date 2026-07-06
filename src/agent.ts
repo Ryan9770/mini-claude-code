@@ -7,7 +7,7 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 import { config } from "./config.js";
-import { toolSchemas, executeTool } from "./tools.js";
+import { toolSchemas, executeTool, safePath } from "./tools.js";
 import { confirm, confirmDangerous, activeSignal, isAborted, askUserChoice } from "./io.js";
 import { classifyCommand } from "./dangerous.js";
 import { getSkills } from "./skills.js";
@@ -16,6 +16,7 @@ import { logRun, loadLearnings, type RunRecord } from "./evolve.js";
 import { runSubagent } from "./subagent.js"; // 런타임에서만 사용(순환 import 안전)
 import { compileToolsToGbnf } from "./grammar.js";
 import { extractToolCalls, parseLooseJson } from "./parser.js";
+import { getImportDefinitions } from "./hover.js";
 
 
 
@@ -302,6 +303,8 @@ export async function runLoop(
     return false;
   };
 
+  let lastActiveFile: string | null = null;
+
   for (let step = 0; step < config.maxSteps; step++) {
     if (isAborted()) {
       console.log("\n⛔ 작업이 취소되었습니다.\n");
@@ -313,60 +316,73 @@ export async function runLoop(
     let content = "";
     let toolCalls: ChatCompletionMessageToolCall[] = [];
     let transcript = "";
-    try {
-      ({ content, toolCalls, transcript } = await streamAssistant(session));
-      if (toolCalls.length === 0) {
-        const availableToolNames = session.tools.map((t) => t.function.name);
-        const looseCalls = extractToolCalls(content || transcript || "", availableToolNames);
-        if (looseCalls.length > 0) {
-          console.log(`  🩹 비규격 출력에서 도구 호출 ${looseCalls.length}건을 복구했습니다.`);
-          toolCalls = looseCalls;
-        }
+    
+    const originalSystemPrompt = session.history[0].content;
+    if (lastActiveFile) {
+      const hoverGuide = await getImportDefinitions(lastActiveFile);
+      if (hoverGuide) {
+        session.history[0].content += "\n" + hoverGuide;
       }
-      consecutiveErrors = 0;
-    } catch (err: any) {
-      // 사용자 취소(Ctrl+C)면 오류 처리·재시도 없이 즉시 정리하고 종료
-      if (isAborted()) {
-        console.log("\n⛔ 작업이 취소되었습니다.\n");
-        return finish("aborted", "");
-      }
-      consecutiveErrors++;
-      const emsg = String(err?.message ?? err);
-      record?.errors.push(emsg.slice(0, 120));
-      console.log(`\n⚠️  모델 응답 오류: ${emsg.slice(0, 160)}`);
-      if (consecutiveErrors > config.maxModelRetries) {
-        console.log("   연속 오류로 이번 작업을 중단합니다.\n");
-        return finish("error_abort", "");
-      }
+    }
 
-      // 반복 루프: 같은 말만 되풀이한 경우 → 멈추고 행동하라고 지시 후 재시도
-      if (/REPETITION_LOOP/.test(emsg)) {
-        console.log("   → 반복을 멈추고 즉시 행동하도록 지시 후 재시도합니다.\n");
-        session.history.push({
-          role: "user",
-          content:
-            "직전 응답이 같은 말을 반복하며 멈췄다. 반복하지 마라. " +
-            "다음 행동이 정해졌으면 설명 없이 즉시 그 도구를 호출하라. " +
-            "아직 결정하지 못했으면 가장 합리적인 하나를 골라 바로 실행하라(되묻거나 망설이지 말 것).",
-        });
+    try {
+      try {
+        ({ content, toolCalls, transcript } = await streamAssistant(session));
+        if (toolCalls.length === 0) {
+          const availableToolNames = session.tools.map((t) => t.function.name);
+          const looseCalls = extractToolCalls(content || transcript || "", availableToolNames);
+          if (looseCalls.length > 0) {
+            console.log(`  🩹 비규격 출력에서 도구 호출 ${looseCalls.length}건을 복구했습니다.`);
+            toolCalls = looseCalls;
+          }
+        }
+        consecutiveErrors = 0;
+      } catch (err: any) {
+        // 사용자 취소(Ctrl+C)면 오류 처리·재시도 없이 즉시 정리하고 종료
+        if (isAborted()) {
+          console.log("\n⛔ 작업이 취소되었습니다.\n");
+          return finish("aborted", "");
+        }
+        consecutiveErrors++;
+        const emsg = String(err?.message ?? err);
+        record?.errors.push(emsg.slice(0, 120));
+        console.log(`\n⚠️  모델 응답 오류: ${emsg.slice(0, 160)}`);
+        if (consecutiveErrors > config.maxModelRetries) {
+          console.log("   연속 오류로 이번 작업을 중단합니다.\n");
+          return finish("error_abort", "");
+        }
+
+        // 반복 루프: 같은 말만 되풀이한 경우 → 멈추고 행동하라고 지시 후 재시도
+        if (/REPETITION_LOOP/.test(emsg)) {
+          console.log("   → 반복을 멈추고 즉시 행동하도록 지시 후 재시도합니다.\n");
+          session.history.push({
+            role: "user",
+            content:
+              "직전 응답이 같은 말을 반복하며 멈췄다. 반복하지 마라. " +
+              "다음 행동이 정해졌으면 설명 없이 즉시 그 도구를 호출하라. " +
+              "아직 결정하지 못했으면 가장 합리적인 하나를 골라 바로 실행하라(되묻거나 망설이지 말 것).",
+          });
+        }
+        // 컨텍스트 초과(400)는 '텍스트 추가'가 아니라 '압축'으로만 회복된다.
+        // (텍스트를 더 넣으면 토큰이 늘어 영영 회복 못 함)
+        else if (/context (size|length)|exceed|too long|too many tokens/i.test(emsg)) {
+          console.log("   → 컨텍스트 초과: 히스토리를 강제 압축 후 재시도합니다.\n");
+          await maybeCompress(session, { force: true });
+        } else {
+          // 흔한 원인: Q4 모델이 큰 파일을 한 번에 생성하다 tool 인자 JSON이 깨져 서버가 500.
+          console.log("   → 더 작게 나눠 재시도하도록 모델에 지시합니다.\n");
+          session.history.push({
+            role: "user",
+            content:
+              "직전 응답에서 도구 호출 인자(JSON)가 깨졌다. 보통 한 번에 너무 큰 파일을 생성하려 할 때 발생한다. " +
+              "파일을 더 작은 조각으로 나눠라: 먼저 짧은 골격을 write_file로 만들고, 이어서 edit_file로 섹션을 덧붙여라. " +
+              "HTML/CSS/JS는 각각 별도 파일로 분리하라.",
+          });
+        }
+        continue;
       }
-      // 컨텍스트 초과(400)는 '텍스트 추가'가 아니라 '압축'으로만 회복된다.
-      // (텍스트를 더 넣으면 토큰이 늘어 영영 회복 못 함)
-      else if (/context (size|length)|exceed|too long|too many tokens/i.test(emsg)) {
-        console.log("   → 컨텍스트 초과: 히스토리를 강제 압축 후 재시도합니다.\n");
-        await maybeCompress(session, { force: true });
-      } else {
-        // 흔한 원인: Q4 모델이 큰 파일을 한 번에 생성하다 tool 인자 JSON이 깨져 서버가 500.
-        console.log("   → 더 작게 나눠 재시도하도록 모델에 지시합니다.\n");
-        session.history.push({
-          role: "user",
-          content:
-            "직전 응답에서 도구 호출 인자(JSON)가 깨졌다. 보통 한 번에 너무 큰 파일을 생성하려 할 때 발생한다. " +
-            "파일을 더 작은 조각으로 나눠라: 먼저 짧은 골격을 write_file로 만들고, 이어서 edit_file로 섹션을 덧붙여라. " +
-            "HTML/CSS/JS는 각각 별도 파일로 분리하라.",
-        });
-      }
-      continue;
+    } finally {
+      session.history[0].content = originalSystemPrompt;
     }
 
 
@@ -446,6 +462,15 @@ export async function runLoop(
       }
 
       console.log(`  ⚙️  ${name}(${summarize(args)})`);
+
+      // lastActiveFile 추적: 읽기/쓰기/편집 도구 호출 시 타겟 파일을 최신 활성화 상태로 기록
+      if (["write_file", "edit_file", "read_file", "patch_ast_node"].includes(name) && typeof args.path === "string") {
+        try {
+          lastActiveFile = safePath(args.path);
+        } catch {
+          // 무시
+        }
+      }
 
       // run_command 위험도 판정 (approve-all을 우회하는 심층 방어)
       const danger = name === "run_command" ? classifyCommand(String(args.command ?? "")) : null;
