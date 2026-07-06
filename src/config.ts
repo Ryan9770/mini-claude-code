@@ -122,6 +122,18 @@ export const config = {
   // 미설정이면 게이트 비활성(모델 리뷰만) — 기존 동작 유지.
   verifyCmd: process.env.MCC_VERIFY_CMD,
 
+  // auto-gate: 검증 명령이 없을 때, 모델이 먼저 '성공 조건 체크 스크립트'(gate_check.mjs)를 스스로 작성해
+  // 그걸 게이트로 삼는다. "테스트가 없으면 테스트를 만들어라" — 게이트 이득(refactor 1/6→6/6)을
+  // 테스트 미제공 과제로 확장하는 실험. 약한 모델이 '쓸 만한 명세'를 쓸 수 있는지가 관건. MCC_AUTO_GATE=1.
+  autoGate: process.env.MCC_AUTO_GATE === "1",
+
+  // 스파이럴 시 승격(escalate-on-spiral): 기본 단일 루프(runAgent)가 분석마비·스텝소진·반복오류로
+  // 막히면, 같은 작업을 critic 루프(컨텍스트 격리된 구현→리뷰→수정)로 재시도한다.
+  // 측정 근거(2026-07-06): 진짜 레버는 게이트가 아니라 critic 루프의 '컨텍스트 격리'
+  // (plain refactor 1/6·median 2/6 → critic 6/6). 실패할 때만 비용을 지불하므로 쉬운 작업은 그대로 빠르다.
+  // 기본 ON. MCC_ESCALATE=0으로 끈다(기준선 비교용).
+  escalateOnSpiral: process.env.MCC_ESCALATE !== "0",
+
   // ── 2티어 검증: 클라우드 리뷰어 (프로바이더 무관) ──────────────
   // 생성은 로컬 모델, '리뷰(critic)'만 강한 클라우드 모델에 위탁한다.
   // OpenAI·Google·Anthropic 모두 OpenAI 호환 엔드포인트를 제공하므로 baseURL만 다르다.
@@ -152,9 +164,14 @@ export const config = {
     (process.env.MCC_ABLATE ?? "").split(",").map((s) => s.trim()).filter(Boolean)
   ),
 
+  // GBNF grammar 사용 여부. llama.cpp 포트(:8080)이거나 명시적 환경변수가 1일 때.
+  useGrammar: process.env.MCC_USE_GRAMMAR === "1" || 
+    (process.env.MCC_BASE_URL ? process.env.MCC_BASE_URL.includes("8080") : true),
+
   // 에이전트 작업 루트 (도구 접근을 이 디렉터리로 제한)
   workdir: process.cwd(),
 
   // run_command가 사용할 셸 (윈도우+Git Bash 자동 감지). undefined면 플랫폼 기본.
   shell: detectShell(),
 };
+

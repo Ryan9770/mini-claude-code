@@ -11,6 +11,8 @@ import { getLibrarySkillBody } from "./skill-router.js";
 import { askUserChoice } from "./io.js";
 import { callMcpTool, mcpHasTool } from "./mcp.js";
 import { activeSignal } from "./io.js";
+import { patchJsTsAst, patchPythonAst } from "./ast.js";
+
 
 // run_command 실행기: 취소(abort) 시 자식 프로세스 '트리 전체'를 종료한다.
 // execAsync/exec의 abort·timeout은 직속 셸만 죽여, 그 셸이 띄운 손자 프로세스
@@ -532,6 +534,22 @@ export const toolSchemas: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "patch_ast_node",
+      description: "JS/TS 또는 Python 파일에서 특정 함수나 클래스(심볼)를 AST 기반으로 찾아 해당 블록 전체를 교체한다. 들여쓰기 꼬임이나 문자열 오매칭 우려가 없고 정확한 치환이 필요할 때 매우 권장합니다.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "수정할 파일 경로" },
+          target_symbol: { type: "string", description: "수정할 클래스, 함수, 또는 메소드 이름" },
+          new_body: { type: "string", description: "대체할 새로운 코드 본문(선언부 전체)" },
+        },
+        required: ["path", "target_symbol", "new_body"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "make_dir",
       description: "디렉터리를 생성한다(상위 경로 포함, 재귀). 셸 mkdir 대신 이 도구를 사용하라.",
       parameters: {
@@ -700,6 +718,17 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         return await webSearch(String(args.query ?? ""), Number(args.limit) || 8);
       case "fetch_url":
         return await fetchUrl(String(args.url ?? ""));
+      case "patch_ast_node": {
+        const p = safePath(args.path);
+        const ext = p.slice(p.lastIndexOf(".")).toLowerCase();
+        if (ext === ".py") {
+          return await patchPythonAst(p, String(args.target_symbol), String(args.new_body));
+        } else if ([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"].includes(ext)) {
+          return await patchJsTsAst(p, String(args.target_symbol), String(args.new_body));
+        } else {
+          return `오류: AST 치환은 JS/TS 및 Python 파일만 지원합니다. 확장자 '${ext}'는 지원되지 않습니다.`;
+        }
+      }
       case "edit_file": {
         const p = safePath(args.path);
         const original = await readFile(p, "utf-8");

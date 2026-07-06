@@ -14,6 +14,10 @@ import { getSkills } from "./skills.js";
 import { skillHint } from "./skill-router.js";
 import { logRun, loadLearnings, type RunRecord } from "./evolve.js";
 import { runSubagent } from "./subagent.js"; // 런타임에서만 사용(순환 import 안전)
+import { compileToolsToGbnf } from "./grammar.js";
+import { extractToolCalls, parseLooseJson } from "./parser.js";
+
+
 
 // 시작 시 스킬 인덱스(name + description)만 노출 — 점진적 공개.
 // ablation(skills) 시 로컬 스킬 목록도 프롬프트에서 제거(기여도 측정용).
@@ -125,9 +129,13 @@ export function createSession(
   label = "main",
   remote?: { client: OpenAI; model: string }
 ): Session {
+  let activeTools = [...tools];
+  if (config.ablate.has("ast")) {
+    activeTools = activeTools.filter(t => t.function.name !== "patch_ast_node");
+  }
   return {
     history: [{ role: "system", content: systemPrompt }],
-    tools,
+    tools: activeTools,
     label,
     client: remote?.client,
     model: remote?.model,
@@ -149,6 +157,10 @@ export function addMainTools(tools: ChatCompletionTool[]): void {
 }
 
 // 메인 에이전트 실행 (텔레메트리 기록 포함)
+// 기본 단일 루프가 '스파이럴'로 끝났음을 나타내는 outcome들(승격 대상).
+// aborted(사용자 Ctrl+C)·done(성공)은 제외 — 실패한 진행만 critic 루프로 재시도한다.
+const SPIRAL_OUTCOMES = new Set(["paralysis_user_stop", "max_steps", "error_abort"]);
+
 export async function runAgent(userInput: string): Promise<string> {
   const record: RunRecord = {
     ts: new Date().toISOString(),
@@ -159,7 +171,20 @@ export async function runAgent(userInput: string): Promise<string> {
     rejections: 0,
     outcome: "",
   };
-  return runLoop(mainSession, userInput, record);
+  const result = await runLoop(mainSession, userInput, record);
+
+  // Escalate-on-spiral: 단일 루프가 막히면(마비·스텝소진·반복오류) 같은 작업을 critic 루프로 재시도.
+  // 컨텍스트 격리가 진짜 레버라는 측정 결과의 적용 — 실패한 경우에만 발동하므로 쉬운 작업엔 영향 없음.
+  // critic 루프는 mainSession이 아니라 '신선한 서브에이전트 세션'을 쓰므로 오염된 문맥을 버리고 재출발한다.
+  if (config.escalateOnSpiral && SPIRAL_OUTCOMES.has(record.outcome)) {
+    console.log(
+      `\n🔁 기본 루프가 '${record.outcome}'로 막힘 — critic 루프(격리된 구현→리뷰→수정)로 재시도합니다.\n`
+    );
+    const { buildWithCritic } = await import("./critic.js"); // 순환 의존 회피용 동적 import
+    await buildWithCritic(userInput);
+    return "(스파이럴 감지 → critic 루프로 재시도 완료. 결과를 확인하세요.)";
+  }
+  return result;
 }
 
 // ── 챗봇(비에이전트) 모드 ──────────────────────────────────
@@ -284,11 +309,20 @@ export async function runLoop(
     }
     if (record) record.steps = step + 1;
     await maybeCompress(session); // 매 스텝 선제 압축 — 초과가 나기 전에 줄인다
+
     let content = "";
     let toolCalls: ChatCompletionMessageToolCall[] = [];
     let transcript = "";
     try {
       ({ content, toolCalls, transcript } = await streamAssistant(session));
+      if (toolCalls.length === 0) {
+        const availableToolNames = session.tools.map((t) => t.function.name);
+        const looseCalls = extractToolCalls(content || transcript || "", availableToolNames);
+        if (looseCalls.length > 0) {
+          console.log(`  🩹 비규격 출력에서 도구 호출 ${looseCalls.length}건을 복구했습니다.`);
+          toolCalls = looseCalls;
+        }
+      }
       consecutiveErrors = 0;
     } catch (err: any) {
       // 사용자 취소(Ctrl+C)면 오류 처리·재시도 없이 즉시 정리하고 종료
@@ -334,6 +368,7 @@ export async function runLoop(
       }
       continue;
     }
+
 
     session.history.push({
       role: "assistant",
@@ -402,7 +437,14 @@ export async function runLoop(
         args = JSON.parse(call.function.arguments || "{}");
       } catch {
         /* 모델이 깨진 JSON을 낸 경우 */
+        try {
+          args = parseLooseJson(call.function.arguments || "{}");
+          console.log("  🩹 깨진 도구 인자 JSON을 느슨한 파서로 복구했습니다.");
+        } catch {
+          /* 최종 복구 실패 */
+        }
       }
+
       console.log(`  ⚙️  ${name}(${summarize(args)})`);
 
       // run_command 위험도 판정 (approve-all을 우회하는 심층 방어)
@@ -480,6 +522,7 @@ async function streamAssistant(session: Session): Promise<{
             // min_p: OpenAI 표준 아님(llama.cpp 확장). SDK 타입엔 없으므로 스프레드로 주입.
             ...(config.minP > 0 ? { min_p: config.minP } : {}),
           } as Record<string, unknown>)),
+
       max_tokens: config.maxResponseTokens, // 한 응답이 무한정 길어지는 것을 하드 차단
       stream: true,
     },

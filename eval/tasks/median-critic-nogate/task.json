@@ -1,0 +1,9 @@
+{
+  "name": "median-critic-nogate",
+  "prompt": "main.js 파일 하나에, 숫자 배열의 중앙값(median)을 반환하는 함수 median(arr)를 작성하라. 배열 길이가 홀수면 정렬 후 가운데 값, 짝수면 가운데 두 값의 평균이다. 그리고 median([10, 2, 33, 4, 5, 100]) 을 계산해 정확히 'MEDIAN=<값>' 형식으로 한 줄 출력하라. node main.js로 실행해 확인하라.",
+  "checker": "check.cjs",
+  "timeoutSec": 600,
+  "env": {
+    "MCC_ENTRY_MODE": "critic"
+  }
+}
