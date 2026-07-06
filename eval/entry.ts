@@ -3,7 +3,7 @@
 // (프로세스 격리 = 세션/모듈 상태 오염 방지).
 //
 // 사용: MCC_EVAL=1 npx tsx eval/entry.ts "<프롬프트>"
-import { runAgent } from "../src/agent.js";
+import { runAgent, classifyAgentTask } from "../src/agent.js";
 import { buildWithCritic } from "../src/critic.js";
 import { beginAbortable, endAbortable, rl } from "../src/io.js";
 
@@ -19,9 +19,11 @@ if (process.env.MCC_EVAL !== "1") {
 
 beginAbortable();
 try {
-  // MCC_ENTRY_MODE=critic이면 생성→검증게이트→리뷰→수정 루프로 실행(2티어 검증 측정용).
-  // 기본은 단일 에이전트. 성공/실패 판정은 어느 쪽이든 러너의 채점기(exit code)가 한다.
+  // MCC_ENTRY_MODE=critic이면 강제 critic. 아니면 라우터(classifyAgentTask)가 코드작업은 critic,
+  // 조회·배치·단순작업은 plain으로 보낸다(config.agentRoute=auto). MCC_AGENT_ROUTE=plain으로 순수 baseline 측정.
+  // 성공/실패 판정은 어느 쪽이든 러너의 채점기(exit code)가 한다.
   if (process.env.MCC_ENTRY_MODE === "critic") await buildWithCritic(prompt);
+  else if (classifyAgentTask(prompt) === "critic") await buildWithCritic(prompt);
   else await runAgent(prompt);
 } catch (err: any) {
   console.error(`eval 실행 오류: ${String(err?.message ?? err).slice(0, 200)}`);

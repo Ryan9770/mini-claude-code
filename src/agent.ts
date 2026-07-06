@@ -212,6 +212,22 @@ export async function runChat(userInput: string): Promise<string> {
 const AGENT_ACTION_RE =
   /커밋|푸시|브랜치|머지|스테이징|만들어|생성|작성|수정|고쳐|편집|삭제|지워|실행|돌려|빌드|리팩터|리팩토링|구현|\bgit\b|\bcommit\b|\bpush\b|\bbranch\b|\bmerge\b|\bpull\b|\bclone\b|\brun\b|\bbuild\b|\bnpm\b|\bnode\b|\btsc\b/i;
 
+// 에이전트 작업을 critic 루프(격리)로 보낼지 plain(단일 루프)로 둘지 판별.
+// 근거: 측정상 critic 루프가 코드 수정·구현 과제에서 plain을 압도(refactor 1/6→6/6, median 2/6→6/6) —
+// 격리가 국소 편집실패·반복이 전체로 번지는 걸 막는다. 조회·검색·배치생성은 반복이득이 없어 plain(빠름) 유지.
+// 비대칭 비용: 어려운 코드작업→plain(스파이럴)이 trivial→critic(느림)보다 훨씬 해로우므로 코드작업은 critic 편향.
+const CODE_WORK_RE =
+  /리팩터|리팩토링|리네임|디버그|버그|고쳐|수정|바꿔|함수|클래스|메서드|컴포넌트|알고리즘|스크립트|엔드포인트|모듈|앱|게임|구현|리팩토|refactor|rename|\bfix\b|\bdebug\b|\bfunction\b|\bclass\b|\bcomponent\b|\bimplement\b|\bendpoint\b/i;
+const QUERY_RE =
+  /검색|찾아|찾아줘|조회|알려줘|설명해|보여줘|목록|뭐야|무엇|어때|시세|뉴스|최신|요약해|어디/i;
+
+export function classifyAgentTask(input: string): "critic" | "plain" {
+  if (config.agentRoute !== "auto") return config.agentRoute; // 강제 지정(plain/critic)
+  if (QUERY_RE.test(input)) return "plain"; // 조회·검색·요약 → 빠른 단일 루프
+  if (CODE_WORK_RE.test(input)) return "critic"; // 코드 수정·구현 → 격리 루프
+  return "plain"; // 기본은 보수적으로 plain(critic 오버헤드는 명확한 코드작업에만)
+}
+
 export async function classifyIntent(userInput: string): Promise<"agent" | "chat"> {
   if (AGENT_ACTION_RE.test(userInput)) return "agent"; // 명백한 행동 요청 → LLM 분류 건너뜀
   try {

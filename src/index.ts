@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 미니 클로드 코드 — 대화형 CLI 진입점
 import { config } from "./config.js";
-import { runAgent, runChat, classifyIntent, addMainTools } from "./agent.js";
+import { runAgent, runChat, classifyIntent, classifyAgentTask, addMainTools } from "./agent.js";
 import { ralphLoop } from "./ralph.js";
 import { buildWithCritic } from "./critic.js";
 import { getSkills, skillsDir } from "./skills.js";
@@ -21,7 +21,17 @@ async function runRouted(input: string, target: "agent" | "chat"): Promise<void>
   beginAbortable();
   try {
     if (target === "chat") await runChat(input);
-    else await runAgent(input);
+    else {
+      // 코드 수정·구현 요청은 critic 루프(컨텍스트 격리)로 — 증명된 레버를 기본 경로로.
+      // 조회·검색·배치·단순 파일작업은 plain(빠름) 유지. MCC_AGENT_ROUTE로 강제 가능.
+      const route = classifyAgentTask(input);
+      if (route === "critic") {
+        console.log("  🔬 라우팅 → critic 루프(격리된 구현→리뷰→수정)");
+        await buildWithCritic(input);
+      } else {
+        await runAgent(input);
+      }
+    }
   } finally {
     busy = false;
     endAbortable();
