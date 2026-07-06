@@ -45,7 +45,7 @@ const ROLES: Record<Role, { prompt: string; tools: ChatCompletionTool[] }> = {
     prompt:
       "너는 '구현 전문' 서브에이전트다. 주어진 작업을 실제로 구현한다(파일 생성·수정, 명령 실행). " +
       "큰 파일은 나눠서 작성하고, 변경 후 가능하면 실행해 검증하라. " +
-      "완료하면 무엇을 어떤 파일에 했는지 간결히 요약해 반환하라." + AST_EDIT_HINT,
+      "완료하면 무엇을 어떤 파일에 했는지 간결히 요약해 반환하라.",
   },
   review: {
     tools: readonlyTools,
@@ -66,7 +66,9 @@ export async function runSubagent(type: string, task: string): Promise<string> {
     `\n  ┌─── 🧩 서브에이전트[${role}]${remote ? ` ☁️ ${remote.model}` : ""} 시작 ───`
   );
   // 서브에이전트도 삽질 방지 규칙을 공유해야 한다(/critic·/ralph는 전부 서브에이전트로 도므로).
-  const session = createSession(`${prompt}\n\n${ANTI_FLAIL_RULES}`, tools, role, remote);
+  // AST_EDIT_HINT는 '호출 시점'에 참조한다 — 모듈 로드 시점 참조는 순환 import TDZ로 깨진다.
+  const codeHint = role === "code" ? AST_EDIT_HINT : "";
+  const session = createSession(`${prompt}\n\n${ANTI_FLAIL_RULES}${codeHint}`, tools, role, remote);
   // 서브에이전트도 텔레메트리를 기록한다(role 표시). critic 모드 라운드가 runs.jsonl에
   // 기록을 남겨야 eval 메커니즘 지표(편집실패·파싱실패 건수)를 집계할 수 있다.
   const record: RunRecord = {
