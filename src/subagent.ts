@@ -7,6 +7,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { createSession, runLoop, ANTI_FLAIL_RULES } from "./agent.js";
 import { toolSchemas } from "./tools.js";
 import { config } from "./config.js";
+import type { RunRecord } from "./evolve.js";
 
 // 2티어 검증: 리뷰어용 클라우드 클라이언트(설정된 경우에만). 생성은 로컬, 판단은 강한 모델.
 // OpenAI·Gemini·Anthropic 모두 OpenAI 호환 엔드포인트라 같은 SDK로 통한다.
@@ -66,7 +67,19 @@ export async function runSubagent(type: string, task: string): Promise<string> {
   );
   // 서브에이전트도 삽질 방지 규칙을 공유해야 한다(/critic·/ralph는 전부 서브에이전트로 도므로).
   const session = createSession(`${prompt}\n\n${ANTI_FLAIL_RULES}`, tools, role, remote);
-  const result = await runLoop(session, task); // 텔레메트리 없음(메인만 기록)
+  // 서브에이전트도 텔레메트리를 기록한다(role 표시). critic 모드 라운드가 runs.jsonl에
+  // 기록을 남겨야 eval 메커니즘 지표(편집실패·파싱실패 건수)를 집계할 수 있다.
+  const record: RunRecord = {
+    ts: new Date().toISOString(),
+    goal: task.slice(0, 200),
+    steps: 0,
+    tools: {},
+    errors: [],
+    rejections: 0,
+    outcome: "",
+    role: `sub:${role}`,
+  };
+  const result = await runLoop(session, task, record);
   console.log(`  └─── 🧩 서브에이전트[${role}] 완료 ───\n`);
 
   // 넛지 프로토콜("끝났다면 DONE")이 서브에이전트 안에서 발동하면 반환값이 'DONE' 한 단어가

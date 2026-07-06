@@ -29,6 +29,9 @@ export interface RunRecord {
   errors: string[];
   rejections: number;
   outcome: string;
+  // 어느 루프의 기록인지: 미설정=메인 에이전트, "sub:code" 등=서브에이전트.
+  // eval 메커니즘 지표가 critic 라운드(서브에이전트만 도는)를 집계할 수 있게 한다.
+  role?: string;
 }
 
 // 한 작업의 실행 기록을 누적 (델타 수집)
