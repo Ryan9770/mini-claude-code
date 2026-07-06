@@ -11,6 +11,7 @@ import { getLibrarySkillBody } from "./skill-router.js";
 import { askUserChoice } from "./io.js";
 import { callMcpTool, mcpHasTool } from "./mcp.js";
 import { activeSignal } from "./io.js";
+import { patchJsTs, patchPython, type PatchResult } from "./ast.js";
 
 // run_command 실행기: 취소(abort) 시 자식 프로세스 '트리 전체'를 종료한다.
 // execAsync/exec의 abort·timeout은 직속 셸만 죽여, 그 셸이 띄운 손자 프로세스
@@ -532,6 +533,25 @@ export const toolSchemas: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "patch_ast_node",
+      description:
+        "함수/클래스/const 등 '심볼 이름'으로 코드 블록 전체를 안전하게 교체한다. old_string 문자열 매칭이 " +
+        "아니라 AST로 노드를 찾으므로, 파일 내용을 정확히 기억하지 못해도 편집할 수 있다. " +
+        "기존 함수/클래스의 본문을 통째로 새로 쓸 때 edit_file보다 안전하다. JS/TS/Python 지원.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "편집할 파일 경로" },
+          target_symbol: { type: "string", description: "교체할 최상위 함수/클래스/const의 이름" },
+          new_body: { type: "string", description: "해당 심볼을 대체할 새 코드 전체(선언부 포함)" },
+        },
+        required: ["path", "target_symbol", "new_body"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "make_dir",
       description: "디렉터리를 생성한다(상위 경로 포함, 재귀). 셸 mkdir 대신 이 도구를 사용하라.",
       parameters: {
@@ -729,6 +749,25 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
             + editReality(original, args.old_string);
         }
         return `오류: old_string을 찾지 못함`;
+      }
+      case "patch_ast_node": {
+        // 심볼 이름으로 함수/클래스/const 노드를 통째로 교체(문자열 매칭 우회).
+        const p = safePath(args.path);
+        const source = await readFile(p, "utf-8");
+        const ext = p.slice(p.lastIndexOf(".")).toLowerCase();
+        const target = String(args.target_symbol ?? "");
+        const body = String(args.new_body ?? "");
+        let r: PatchResult;
+        if (ext === ".py") r = await patchPython(p, source, target, body);
+        else if (JS_EXT.has(ext)) r = await patchJsTs(args.path, source, target, body);
+        else return `오류: patch_ast_node는 JS/TS/Python만 지원한다(확장자 ${ext}).`;
+
+        if (!r.ok) {
+          const hint = r.symbols?.length ? ` 파일의 최상위 심볼: ${r.symbols.join(", ")}` : "";
+          return `오류: ${r.error}.${hint}`;
+        }
+        await writeFile(p, r.updated!, "utf-8");
+        return `OK: ${args.path}의 '${target}' 교체됨` + (await diagnose(p, r.updated!));
       }
       case "list_dir": {
         const dir = safePath(args.path ?? ".");
