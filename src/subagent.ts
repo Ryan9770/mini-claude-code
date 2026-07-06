@@ -4,7 +4,7 @@
 // 에이전트 간 "통신"은 공유 파일시스템(workdir)을 통해 이뤄진다 — Ralph의 PROGRESS.md와 같은 원리.
 import OpenAI from "openai";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
-import { createSession, runLoop, ANTI_FLAIL_RULES } from "./agent.js";
+import { createSession, runLoop, ANTI_FLAIL_RULES, AST_EDIT_HINT } from "./agent.js";
 import { toolSchemas } from "./tools.js";
 import { config } from "./config.js";
 import type { RunRecord } from "./evolve.js";
@@ -45,7 +45,7 @@ const ROLES: Record<Role, { prompt: string; tools: ChatCompletionTool[] }> = {
     prompt:
       "너는 '구현 전문' 서브에이전트다. 주어진 작업을 실제로 구현한다(파일 생성·수정, 명령 실행). " +
       "큰 파일은 나눠서 작성하고, 변경 후 가능하면 실행해 검증하라. " +
-      "완료하면 무엇을 어떤 파일에 했는지 간결히 요약해 반환하라.",
+      "완료하면 무엇을 어떤 파일에 했는지 간결히 요약해 반환하라." + AST_EDIT_HINT,
   },
   review: {
     tools: readonlyTools,

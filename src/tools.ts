@@ -486,7 +486,7 @@ async function* walkFiles(dir: string): AsyncGenerator<string> {
 }
 
 // ── 도구 스키마 (LLM에게 전달) ──────────────────────────────
-export const toolSchemas: ChatCompletionTool[] = [
+const allToolSchemas: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
@@ -679,6 +679,12 @@ export const toolSchemas: ChatCompletionTool[] = [
     },
   },
 ];
+
+// AST 편집기 기여도 측정용 ablation: MCC_ABLATE=ast면 patch_ast_node 도구를 노출하지 않는다
+// (모델은 edit_file만 쓰게 됨 → 편집실패 지표를 AST 있음/없음으로 A/B 비교).
+export const toolSchemas: ChatCompletionTool[] = config.ablate.has("ast")
+  ? allToolSchemas.filter((t) => t.function.name !== "patch_ast_node")
+  : allToolSchemas;
 
 // ── 도구 실행 함수 ──────────────────────────────────────────
 type ToolResult = string;

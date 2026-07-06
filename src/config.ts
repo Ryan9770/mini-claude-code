@@ -148,6 +148,7 @@ export const config = {
   //          / skills(로컬 스킬 목록) / lsp(쓰기 후 문법 진단 첨부)
   //          / editfix(edit_file 공백 관용 매칭 + 실패 시 실제 내용 반환)
   //          / gitgate(git push 사전 게이트: 비밀·강제·기본브랜치·검증)
+  //          / ast(patch_ast_node 도구+힌트 — 끄면 edit_file만; AST 편집 기여도 측정용)
   ablate: new Set(
     (process.env.MCC_ABLATE ?? "").split(",").map((s) => s.trim()).filter(Boolean)
   ),
