@@ -285,6 +285,7 @@ export async function runLoop(
   const recentTranscripts: string[] = []; // 최근 스텝의 사고+응답(분석마비 감지용)
   let paralysis = 0; // 연속으로 '거의 같은 내용'을 반복한 스텝 수
   let paralysisNudged = false; // 강한 넛지를 이미 1회 넣었는지
+  let refusals = 0; // 연속 거부 횟수 — 거부는 '하지 마'라는 의도적 신호. 우회 루프를 끊는 근거
 
   // 분석마비 최종 방어선: 스스로 못 풀면 죽이지 않고 사용자에게 넘긴다(HITL).
   // true 반환 시 호출부가 작업을 종료한다. false면 사용자 지시를 주입하고 계속.
@@ -446,7 +447,10 @@ export async function runLoop(
       } else if (danger?.level === "danger" && !(await confirmDangerous(String(args.command), danger.why))) {
         console.log("  ⛔ 거부됨(위험 명령)");
         if (record) record.rejections++;
-        result = "사용자가 위험 명령을 거부했다. 파괴적이지 않은 안전한 대안을 찾으라.";
+        refusals++;
+        result =
+          "사용자가 이 위험 명령을 의도적으로 거부했다. 같은 목표를 다른 명령·도구로 우회하려 하지 마라. " +
+          "멈추고 사용자의 지시를 기다려라(꼭 필요하면 ask_user로 한 번만 물어라).";
       } else if (
         // 위험 명령은 위에서 이미 확인됨 → 일반 RISKY 확인은 건너뜀
         !danger &&
@@ -455,15 +459,29 @@ export async function runLoop(
       ) {
         console.log("  ⛔ 거부됨");
         if (record) record.rejections++;
-        result = "사용자가 이 작업을 거부했습니다. 다른 접근을 시도하거나 사용자에게 무엇을 원하는지 물어보세요.";
+        refusals++;
+        result =
+          "사용자가 이 작업을 의도적으로 거부했다. 이는 '하지 마라'는 신호다. " +
+          "같은 목표를 다른 도구로 우회 시도하지 마라(예: make_dir 거부됐다고 write_file/run_command로 재시도 금지). " +
+          "멈추고, 정말 필요하면 ask_user로 어떻게 진행할지 한 번만 물어라. 그 외에는 여기서 종료하라.";
       } else if (name === "spawn_subagent") {
         // 하위 작업을 전문 서브에이전트에 위임 (격리 컨텍스트)
         result = await runSubagent(args.type, args.task);
       } else {
+        if (RISKY.has(name)) refusals = 0; // 위험 작업을 승인·실행함 → 사용자가 관여 중, 카운터 리셋
         result = await executeTool(name, args);
         if (result.startsWith("오류") && record) record.errors.push(`${name}: ${result.slice(0, 100)}`);
       }
       session.history.push({ role: "tool", tool_call_id: call.id, content: result });
+    }
+
+    // 거부가 연속 2회면 → 우회 루프를 끊고 사용자에게 넘긴다. 거부는 '하지 마'라는 의도적
+    // 신호이므로, 문구로 타일러도 무시하고 다른 도구로 계속 시도하는 약한 모델을 강제로 멈춘다.
+    if (refusals >= 2) {
+      console.log("\n⛔ 거부가 반복됨 — 우회를 멈추고 사용자에게 넘깁니다.\n");
+      if (config.evalMode) return finish("user_refused", content);
+      if (await handoffToUser()) return finish("user_refused", content);
+      refusals = 0; // 사용자가 새 방향을 줬으면(handoff가 false) 계속
     }
 
     // ask_user로 사용자가 새 방향을 줬으면 분석마비 카운터를 리셋(새 국면 → 백지에서 재시작).
@@ -472,6 +490,7 @@ export async function runLoop(
       paralysis = 0;
       paralysisNudged = false;
       recentTranscripts.length = 0;
+      refusals = 0; // 사용자에게 새 방향을 물었으니 거부 카운터도 리셋
     } else if (paralysisHandoffNow) {
       // 도구 결과를 모두 넣은 뒤(짝 유지) 분석마비 개입: 핸드오프 우선, 그다음 넛지
       if (await handoffToUser()) return finish("paralysis_user_stop", content);
