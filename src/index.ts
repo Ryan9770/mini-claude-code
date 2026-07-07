@@ -170,7 +170,13 @@ async function main() {
         const rest = input.slice(1 + name.length).trim();
         const body = getSkillBody(name) ?? getLibrarySkillBody(name);
         if (body) {
-          const goal = rest || "이 스킬의 목적에 맞는 작업을 시작하라.";
+          // 인자가 있으면 그것을 목표로. 없으면 '그냥 시작하라'는 약한 모델을 마비시킨다
+          // (입력이 필수인 대화형 스킬에서 예고↔계획 진동). 대신 '부족한 정보는 ask_user로
+          // 한 번에 모은 뒤 진행하라'고 명시해 확실한 첫 행동을 지시한다.
+          const goal = rest
+            ? rest
+            : "구체적 요청이 주어지지 않았다. 스킬 진행에 필요한 정보가 부족하면, 예고나 반복 계획 없이 " +
+              "지금 즉시 ask_user 도구를 한 번 호출해 필요한 입력을 모두 모아라. 정보가 갖춰지면 곧바로 스킬 절차를 실행하라.";
           const prompt =
             `아래 스킬 지침을 그대로 따라 작업을 수행하라.\n\n[스킬: ${name}]\n${body}\n\n[사용자 요청]\n${goal}`;
           console.log(`  🎯 스킬 직접 발동 → ${name}`);
