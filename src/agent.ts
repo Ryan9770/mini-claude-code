@@ -220,10 +220,15 @@ const CODE_WORK_RE =
   /리팩터|리팩토링|리네임|디버그|버그|고쳐|수정|바꿔|함수|클래스|메서드|컴포넌트|알고리즘|스크립트|엔드포인트|모듈|앱|게임|구현|리팩토|refactor|rename|\bfix\b|\bdebug\b|\bfunction\b|\bclass\b|\bcomponent\b|\bimplement\b|\bendpoint\b/i;
 const QUERY_RE =
   /검색|찾아|찾아줘|조회|알려줘|설명해|보여줘|목록|뭐야|무엇|어때|시세|뉴스|최신|요약해|어디/i;
+// 창작·문서 글쓰기 — "게임 시나리오"처럼 코드어(게임/앱)를 포함해도 코드가 아니다.
+// critic(코드 구현→리뷰→수정 루프)의 대상이 아니므로 CODE_WORK_RE보다 먼저 plain으로 보낸다.
+const WRITING_RE =
+  /시나리오|스토리|줄거리|시놉시스|서사|세계관|대본|각본|소설|에세이|카피|기획서|보고서|문서로/i;
 
 export function classifyAgentTask(input: string): "critic" | "plain" {
   if (config.agentRoute !== "auto") return config.agentRoute; // 강제 지정(plain/critic)
   if (QUERY_RE.test(input)) return "plain"; // 조회·검색·요약 → 빠른 단일 루프
+  if (WRITING_RE.test(input)) return "plain"; // 창작·문서 글쓰기 → 코드 루프 아님
   if (CODE_WORK_RE.test(input)) return "critic"; // 코드 수정·구현 → 격리 루프
   return "plain"; // 기본은 보수적으로 plain(critic 오버헤드는 명확한 코드작업에만)
 }
