@@ -1,0 +1,6 @@
+{
+  "name": "fn-rewrite",
+  "prompt": "main.js의 analyze 함수를 '평균(mean)'이 아니라 '중앙값(median)'을 반환하도록 다시 작성하라. 정렬 후 길이가 홀수면 가운데 값, 짝수면 가운데 두 값의 평균이다. 반환 문자열은 정확히 'MEDIAN=<값>' 형식으로 바꿔라(예: MEAN=... → MEDIAN=...). clamp와 label 함수는 그대로 두고 analyze만 수정하라. node main.js로 실행해 확인하라.",
+  "checker": "check.cjs",
+  "timeoutSec": 300
+}
