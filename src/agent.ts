@@ -210,7 +210,7 @@ export async function runChat(userInput: string): Promise<string> {
 // 실전 버그: "hello.txt 만들고 커밋·push해줘"가 CHAT으로 오분류돼 "컴퓨터 접근 못함"을 답했음.
 // 비대칭 비용: 행동→CHAT 오분류(작업 거부)가 개념질문→AGENT 오분류(그냥 답함)보다 훨씬 해롭다 → AGENT로 편향.
 const AGENT_ACTION_RE =
-  /커밋|푸시|브랜치|머지|스테이징|만들어|생성|작성|수정|고쳐|편집|삭제|지워|실행|돌려|빌드|리팩터|리팩토링|구현|\bgit\b|\bcommit\b|\bpush\b|\bbranch\b|\bmerge\b|\bpull\b|\bclone\b|\brun\b|\bbuild\b|\bnpm\b|\bnode\b|\btsc\b/i;
+  /커밋|푸시|브랜치|머지|스테이징|만들어|만들라|생성|작성|수정|고쳐|편집|삭제|지워|실행|돌려|빌드|리팩터|리팩토링|구현|설계|디자인|기획|조사|분석|리서치|실험|개발|\bgit\b|\bcommit\b|\bpush\b|\bbranch\b|\bmerge\b|\bpull\b|\bclone\b|\brun\b|\bbuild\b|\bnpm\b|\bnode\b|\btsc\b/i;
 
 // 에이전트 작업을 critic 루프(격리)로 보낼지 plain(단일 루프)로 둘지 판별.
 // 근거: 측정상 critic 루프가 코드 수정·구현 과제에서 plain을 압도(refactor 1/6→6/6, median 2/6→6/6) —
