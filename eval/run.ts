@@ -13,6 +13,7 @@ import { spawn } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { aggregateHome } from "./metrics.js";
 
 const evalDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(evalDir, "..");
@@ -29,10 +30,16 @@ interface Task {
 }
 interface RoundResult {
   success: boolean;
-  steps: number | null;
+  steps: number | null; // 라운드 총 스텝(메인+서브에이전트 합)
   outcome: string;
   seconds: number;
   checkerNote: string;
+  // 메커니즘 지표: 통과율(고분산)보다 민감한 직접 신호 — 기능 A/B는 이걸로 판정
+  agents: number; // 텔레메트리 레코드 수(2+ = critic 서브에이전트 라운드)
+  editFail: number; // edit_file 매칭 실패 건수
+  parseFail: number; // 응답 파싱/JSON 실패 건수
+  loops: number; // REPETITION_LOOP 건수
+  editTries: number; // edit_file+patch_ast_node 호출 수(실패율 분모)
 }
 interface Result {
   task: string;
@@ -92,17 +99,6 @@ function runProc(
   });
 }
 
-// 과제 실행 후 MCC_HOME/runs.jsonl(과제별 격리)에서 스텝·outcome 텔레메트리를 회수
-function readRunRecord(home: string): { steps: number | null; outcome: string } {
-  try {
-    const lines = readFileSync(join(home, "runs.jsonl"), "utf-8").trim().split("\n");
-    const r = JSON.parse(lines[lines.length - 1]);
-    return { steps: r.steps ?? null, outcome: r.outcome ?? "?" };
-  } catch {
-    return { steps: null, outcome: "no-record" };
-  }
-}
-
 async function main() {
   // 선택: 특정 과제만 (쉼표 목록 지원 — 예: npx tsx eval/run.ts big-list,csv-sum)
   const only = process.argv[2] ? new Set(process.argv[2].split(",").map((s) => s.trim())) : null;
@@ -159,13 +155,19 @@ async function main() {
       const check = await runProc(
         "node", [JSON.stringify(join(tasksDir, name, task.checker))], ws, process.env, 30_000
       );
-      const rec = readRunRecord(home);
+      // 메커니즘 지표 집계(메인+서브에이전트 레코드 전부 — critic 라운드도 기록됨)
+      const rec = aggregateHome(home);
       rounds.push({
         success: check.code === 0,
         steps: rec.steps,
         outcome: agent.timedOut ? "timeout" : rec.outcome,
         seconds,
         checkerNote: check.out.trim().slice(0, 120) || "(채점기 출력 없음)",
+        agents: rec.agents,
+        editFail: rec.editFail,
+        parseFail: rec.parseFail,
+        loops: rec.loops,
+        editTries: rec.editTries,
       });
       console.log(`\n   ${check.code === 0 ? "✅ PASS" : "❌ FAIL"} — ${rounds.at(-1)!.checkerNote}`);
     }
@@ -177,15 +179,24 @@ async function main() {
   const totalRuns = results.reduce((n, r) => n + r.rounds.length, 0);
   console.log(`\n\n══════════ 결과: ${totalPass}/${totalRuns} 통과 (ablate=[${ablate || "-"}], ${ROUNDS}회 반복) ══════════`);
   const w = Math.max(...results.map((r) => r.task.length), 4);
-  console.log(`${"task".padEnd(w)}  통과   스텝(중앙)  시간(중앙)  outcomes`);
+  console.log(`${"task".padEnd(w)}  통과   스텝(중앙)  시간(중앙)  편집✗/시도  파싱✗  반복  outcomes`);
   for (const r of results) {
     const stepMed = median(r.rounds.map((x) => x.steps ?? NaN));
     const secMed = median(r.rounds.map((x) => x.seconds));
     const outcomes = r.rounds.map((x) => x.outcome).join(",");
+    const sum = (f: (x: RoundResult) => number) => r.rounds.reduce((n, x) => n + f(x), 0);
+    const edit = `${sum((x) => x.editFail)}/${sum((x) => x.editTries)}`;
     console.log(
-      `${r.task.padEnd(w)}  ${r.passes}/${r.rounds.length}   ${String(Number.isFinite(stepMed) ? stepMed : "?").padStart(6)}     ${String(Math.round(secMed) + "s").padStart(6)}   ${outcomes}`
+      `${r.task.padEnd(w)}  ${r.passes}/${r.rounds.length}   ${String(Number.isFinite(stepMed) ? stepMed : "?").padStart(6)}     ${String(Math.round(secMed) + "s").padStart(6)}   ${edit.padStart(8)}  ${String(sum((x) => x.parseFail)).padStart(5)}  ${String(sum((x) => x.loops)).padStart(4)}  ${outcomes}`
     );
   }
+  // 메커니즘 지표 총계 — 통과율(고분산) 대신 기능 A/B 판정에 쓰는 직접 신호
+  const all = results.flatMap((r) => r.rounds);
+  const tot = (f: (x: RoundResult) => number) => all.reduce((n, x) => n + f(x), 0);
+  console.log(
+    `\n📎 메커니즘 지표 총계 — 편집실패 ${tot((x) => x.editFail)}/${tot((x) => x.editTries)}시도, ` +
+      `파싱실패 ${tot((x) => x.parseFail)}, 반복루프 ${tot((x) => x.loops)}`
+  );
   mkdirSync(runsDir, { recursive: true });
   writeFileSync(
     join(runsDir, "results.json"),

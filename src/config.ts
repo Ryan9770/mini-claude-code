@@ -122,6 +122,13 @@ export const config = {
   // 미설정이면 게이트 비활성(모델 리뷰만) — 기존 동작 유지.
   verifyCmd: process.env.MCC_VERIFY_CMD,
 
+  // 에이전트 라우팅: 코드 수정·구현 요청을 기본 단일 루프(plain)가 아니라 critic 루프(컨텍스트 격리)로 보낸다.
+  // 근거: 격리가 유일하게 증명된 레버(refactor 1/6→6/6, median 2/6→6/6). 조회·검색·배치생성은 plain(빠름) 유지.
+  // auto=휴리스틱 분류 / plain=항상 단일루프 / critic=항상 critic. MCC_AGENT_ROUTE로 지정.
+  agentRoute: (["auto", "plain", "critic"].includes(process.env.MCC_AGENT_ROUTE ?? "")
+    ? process.env.MCC_AGENT_ROUTE
+    : "auto") as "auto" | "plain" | "critic",
+
   // ── 2티어 검증: 클라우드 리뷰어 (프로바이더 무관) ──────────────
   // 생성은 로컬 모델, '리뷰(critic)'만 강한 클라우드 모델에 위탁한다.
   // OpenAI·Google·Anthropic 모두 OpenAI 호환 엔드포인트를 제공하므로 baseURL만 다르다.
@@ -148,6 +155,7 @@ export const config = {
   //          / skills(로컬 스킬 목록) / lsp(쓰기 후 문법 진단 첨부)
   //          / editfix(edit_file 공백 관용 매칭 + 실패 시 실제 내용 반환)
   //          / gitgate(git push 사전 게이트: 비밀·강제·기본브랜치·검증)
+  //          / ast(patch_ast_node 도구+힌트 — 끄면 edit_file만; AST 편집 기여도 측정용)
   ablate: new Set(
     (process.env.MCC_ABLATE ?? "").split(",").map((s) => s.trim()).filter(Boolean)
   ),
