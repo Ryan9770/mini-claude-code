@@ -4,8 +4,8 @@ import { config } from "./config.js";
 import { runAgent, runChat, classifyIntent, classifyAgentTask, addMainTools } from "./agent.js";
 import { ralphLoop } from "./ralph.js";
 import { buildWithCritic } from "./critic.js";
-import { getSkills, skillsDir } from "./skills.js";
-import { buildIndex, skillLibDir } from "./skill-router.js";
+import { getSkills, getSkillBody, skillsDir } from "./skills.js";
+import { buildIndex, skillLibDir, getLibrarySkillBody } from "./skill-router.js";
 import { evolve } from "./evolve.js";
 import { initMcp, getMcpTools, mcpServerInfo, closeMcp } from "./mcp.js";
 import { rl, beginAbortable, endAbortable, requestAbort } from "./io.js";
@@ -74,7 +74,8 @@ async function main() {
   if (mcp.servers) console.log(`  mcp     : ${mcp.servers}개 서버, ${mcp.tools}개 도구`);
 
   console.log(`  모드: /auto(기본) · /agent · /chat  — 현재: ${mode}  (/chat <메시지> = 단발 강제)`);
-  console.log(`  명령: /ralph | /critic | /skills | /evolve | /mcp | exit  (작업 중 Ctrl+C=취소)\n`);
+  console.log(`  명령: /ralph | /critic | /skills | /evolve | /mcp | exit  (작업 중 Ctrl+C=취소)`);
+  console.log(`  스킬: /<스킬명> [요청]  — 스킬 직접 발동 (예: /ml-experiment 분류 모델 실험)  (/skills=목록)\n`);
 
   while (true) {
     let input: string;
@@ -161,6 +162,32 @@ async function main() {
         }
         continue;
       }
+      // ── 제네릭 스킬 트리거: /<스킬명> [요청] → 해당 스킬을 직접 발동 ──
+      // 하네스/로컬 스킬 문서에 '/skill-name으로 트리거'로 안내돼 있으므로 슬래시 강제 발동을 지원한다.
+      // (약한 모델이 use_skill을 스스로 고르길 기다리지 않고 확실히 발동 — 오케스트레이터 스킬에 특히 유용)
+      if (input.startsWith("/")) {
+        const name = input.slice(1).split(/\s+/)[0];
+        const rest = input.slice(1 + name.length).trim();
+        const body = getSkillBody(name) ?? getLibrarySkillBody(name);
+        if (body) {
+          const goal = rest || "이 스킬의 목적에 맞는 작업을 시작하라.";
+          const prompt =
+            `아래 스킬 지침을 그대로 따라 작업을 수행하라.\n\n[스킬: ${name}]\n${body}\n\n[사용자 요청]\n${goal}`;
+          console.log(`  🎯 스킬 직접 발동 → ${name}`);
+          busy = true;
+          beginAbortable();
+          try {
+            await runAgent(prompt); // 스킬 본문이 오케스트레이션을 지시하므로 plain 에이전트로 실행
+          } finally {
+            busy = false;
+            endAbortable();
+          }
+          continue;
+        }
+        console.log(`알 수 없는 명령/스킬: /${name}  — /skills로 로컬 목록 확인 (라이브러리 스킬도 /이름으로 발동 가능)`);
+        continue;
+      }
+
       // 일반 입력: auto면 의도 분류로 라우팅, 아니면 지정 모드로.
       const target = mode === "auto" ? await classifyIntent(input) : mode;
       if (mode === "auto") console.log(`  🔀 자동 판단 → ${target}`);
