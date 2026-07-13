@@ -107,7 +107,10 @@ export const spawnSubagentSchema: ChatCompletionTool = {
     name: "spawn_subagent",
     description:
       "전문 서브에이전트에게 하위 작업을 위임하고 결과 요약을 받는다. 큰 작업을 나눌 때 사용. " +
-      "type: 'explore'(읽기 전용 탐색·조사), 'code'(구현·수정), 'review'(코드 검토·비평).",
+      "type: 'explore'(읽기 전용 조사 — 정보를 찾아 텍스트로만 반환, 파일 생성·저장 불가), " +
+      "'code'(구현·문서 산출 — 파일 생성·수정·명령 실행 가능), 'review'(읽기 전용 코드 검토·비평). " +
+      "⚠️ 파일을 생성하거나 저장해야 하는 작업(보고서·분석 결과를 _workspace/*.md로 저장 등)은 반드시 'code'로 위임하라 — " +
+      "explore/review는 쓰기 도구가 없어 그런 작업을 완료할 수 없다.",
     parameters: {
       type: "object",
       properties: {
@@ -293,6 +296,18 @@ export async function runLoop(
     if (config.evalMode) {
       // 평가 모드: 사용자가 없으므로 핸드오프 대신 중단(outcome=paralysis로 기록됨)
       console.log(`\n🌀 분석마비 — 평가 모드이므로 중단합니다.`);
+      return true;
+    }
+    // 라이브락 가드: 쓰기 도구가 없는 서브에이전트(explore/review)가 마비되면 사용자에게 물어봐야
+    // 소용없다 — "계속 진행"해도 없는 쓰기 능력이 생기지 않아 같은 결론을 무한 반복한다(livelock).
+    // 대신 중단하고 부모에게 반환한다. (쓰기가 필요한 작업이면 오케스트레이터가 'code'로 재위임해야 함)
+    // 메인 세션은 항상 쓰기 도구를 가지므로 이 분기에 걸리지 않는다 = 서브에이전트에만 적용.
+    const canWrite = session.tools.some((t) => RISKY.has(t.function.name));
+    if (!canWrite) {
+      console.log(
+        `\n🌀 분석마비(읽기 전용 서브에이전트) — 사용자 위임은 무의미하므로 중단하고 부모에 반환합니다. ` +
+          `쓰기가 필요한 작업이면 'code' 역할로 재위임하세요.`
+      );
       return true;
     }
     console.log(`\n🌀 분석마비 — 진전이 없어 사용자에게 넘깁니다.`);

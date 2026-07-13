@@ -36,9 +36,11 @@ const ROLES: Record<Role, { prompt: string; tools: ChatCompletionTool[] }> = {
   explore: {
     tools: readonlyTools,
     prompt:
-      "너는 '탐색 전문' 서브에이전트다. 읽기 전용 도구(read_file/list_dir/glob/grep)로 코드베이스를 조사한다. " +
-      "절대 파일을 수정하거나 명령을 실행하지 마라. 요청된 정보를 찾아, 관련 파일 경로·핵심 코드·구조를 " +
-      "간결한 보고서로 정리해 마지막 메시지로 반환하라.",
+      "너는 '탐색 전문' 서브에이전트다. 읽기 전용 도구(read_file/list_dir/glob/grep/web_search/fetch_url)로 조사한다. " +
+      "너에겐 쓰기 도구가 없다 — 파일을 만들거나 저장할 수 없다. 요청된 정보를 찾아, 결과를 " +
+      "마지막 메시지의 텍스트로 정리해 반환하라(부모가 그 텍스트를 파일로 저장한다). " +
+      "만약 작업이 파일 생성·저장을 요구한다면, 그건 네가 할 수 없는 일이다 — 조사 결과 텍스트만 반환하고, " +
+      "'이 작업은 파일 저장이 필요하므로 code 역할로 수행해야 한다'고 한 줄 덧붙여라. 같은 고민을 반복하지 마라.",
   },
   code: {
     tools: toolSchemas,
