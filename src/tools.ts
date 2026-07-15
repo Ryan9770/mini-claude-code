@@ -3,7 +3,7 @@
 
 import { readFile, writeFile, readdir, stat, mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { resolve, join, relative, isAbsolute, dirname } from "node:path";
+import { resolve, join, relative, isAbsolute, dirname, basename, extname } from "node:path";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { config } from "./config.js";
 import { getSkills, getSkillBody, skillsDir } from "./skills.js";
@@ -292,6 +292,75 @@ function safePath(p: string): string {
     throw new Error(`허용된 디렉터리 밖 접근 거부: ${p}`);
   }
   return abs;
+}
+
+// ── 경로 퍼지 수리 ───────────────────────────────────────────
+// 약한 모델이 파일 경로/확장자를 오염(.md→.mmd/.py, 이름 오타)시켜 read/edit/patch가
+// 대상을 못 찾는 것을 완화한다. 요청 경로가 없으면 같은 디렉터리에서 '유일하게 근접한
+// 실존 파일'을 찾아 대신 쓰고, 수리 사실을 결과에 밝힌다. MCC_ABLATE=pathfix로 끔(측정용).
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  const cur = new Array<number>(n + 1);
+  for (let i = 1; i <= m; i++) {
+    cur[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    for (let k = 0; k <= n; k++) prev[k] = cur[k];
+  }
+  return prev[n];
+}
+
+// 실존 파일이면 그대로. 없으면 같은 디렉터리에서 근접 실존 파일을 '유일할 때만' 반환.
+async function resolveExistingPath(abs: string): Promise<{ path: string; repaired?: string }> {
+  try {
+    if ((await stat(abs)).isFile()) return { path: abs };
+  } catch {
+    /* 없음 → 수리 시도 */
+  }
+  const dir = dirname(abs);
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return { path: abs };
+  }
+  const want = basename(abs);
+  const wStem = basename(abs, extname(abs));
+  const wExt = extname(abs);
+  const cands = entries.filter((e) => {
+    if (e === want) return false;
+    // (a) 같은 스템, 다른 확장자 (예: 00_input.md ↔ 00_input.py/.mmd)
+    if (wStem && basename(e, extname(e)) === wStem) return true;
+    // (b) 같은 확장자 + 편집거리 ≤2 + 이름 길이 ≥4 (오타 방어, 짧은 이름 오매칭 방지)
+    if (wExt && extname(e) === wExt && want.length >= 4 && levenshtein(e, want) <= 2) return true;
+    return false;
+  });
+  if (cands.length === 1) {
+    const p = join(dir, cands[0]);
+    try {
+      if ((await stat(p)).isFile()) return { path: p, repaired: cands[0] };
+    } catch {
+      /* skip */
+    }
+  }
+  return { path: abs };
+}
+
+// safePath + 경로 퍼지 수리. 실존 파일이 필요한 도구(read/edit/patch)에서 사용.
+// 반환 note는 수리가 일어났을 때만 채워져 결과에 앞에 붙는다(투명성).
+async function safeExisting(p: string): Promise<{ path: string; note: string }> {
+  const abs = safePath(p);
+  if (config.ablate.has("pathfix")) return { path: abs, note: "" };
+  const r = await resolveExistingPath(abs);
+  return {
+    path: r.path,
+    note: r.repaired ? `(경로 수리: 요청 '${p}' 없음 → 실제 파일 '${r.repaired}' 사용)\n` : "",
+  };
 }
 
 // ── edit_file 회복력 ─────────────────────────────────────────────
@@ -708,8 +777,9 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
     }
     switch (name) {
       case "read_file": {
-        const content = await readFile(safePath(args.path), "utf-8");
-        return content.length ? content : "(빈 파일)";
+        const { path: fp, note } = await safeExisting(args.path);
+        const content = await readFile(fp, "utf-8");
+        return note + (content.length ? content : "(빈 파일)");
       }
       case "write_file": {
         const p = safePath(args.path);
@@ -738,7 +808,7 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
       case "fetch_url":
         return await fetchUrl(String(args.url ?? ""));
       case "edit_file": {
-        const p = safePath(args.path);
+        const { path: p, note } = await safeExisting(args.path);
         const original = await readFile(p, "utf-8");
         const fix = !config.ablate.has("editfix");
         const count = original.split(args.old_string).length - 1;
@@ -746,7 +816,7 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         if (count === 1) {
           const updated = original.replace(args.old_string, args.new_string);
           await writeFile(p, updated, "utf-8");
-          return `OK: ${args.path} 수정됨` + (await diagnose(p, updated));
+          return note + `OK: ${args.path} 수정됨` + (await diagnose(p, updated));
         }
         if (count > 1) {
           return `오류: old_string이 ${count}곳에서 발견됨(유일해야 함). 더 긴 문맥을 포함하라.`
@@ -769,22 +839,22 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
       }
       case "patch_ast_node": {
         // 심볼 이름으로 함수/클래스/const 노드를 통째로 교체(문자열 매칭 우회).
-        const p = safePath(args.path);
+        const { path: p, note } = await safeExisting(args.path);
         const source = await readFile(p, "utf-8");
         const ext = p.slice(p.lastIndexOf(".")).toLowerCase();
         const target = String(args.target_symbol ?? "");
         const body = String(args.new_body ?? "");
         let r: PatchResult;
         if (ext === ".py") r = await patchPython(p, source, target, body);
-        else if (JS_EXT.has(ext)) r = await patchJsTs(args.path, source, target, body);
+        else if (JS_EXT.has(ext)) r = await patchJsTs(p, source, target, body);
         else return `오류: patch_ast_node는 JS/TS/Python만 지원한다(확장자 ${ext}).`;
 
         if (!r.ok) {
           const hint = r.symbols?.length ? ` 파일에서 사용 가능한 심볼: ${r.symbols.join(", ")}` : "";
-          return `오류: ${r.error}.${hint}`;
+          return note + `오류: ${r.error}.${hint}`;
         }
         await writeFile(p, r.updated!, "utf-8");
-        return `OK: ${args.path}의 '${target}' 교체됨` + (await diagnose(p, r.updated!));
+        return note + `OK: ${args.path}의 '${target}' 교체됨` + (await diagnose(p, r.updated!));
       }
       case "list_dir": {
         const dir = safePath(args.path ?? ".");
