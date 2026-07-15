@@ -535,15 +535,26 @@ const allToolSchemas: ChatCompletionTool[] = [
     function: {
       name: "patch_ast_node",
       description:
-        "함수/클래스/const 등 '심볼 이름'으로 코드 블록 전체를 안전하게 교체한다. old_string 문자열 매칭이 " +
+        "함수/클래스/const/메서드 등 '심볼 이름'으로 코드 블록 전체를 안전하게 교체한다. old_string 문자열 매칭이 " +
         "아니라 AST로 노드를 찾으므로, 파일 내용을 정확히 기억하지 못해도 편집할 수 있다. " +
-        "기존 함수/클래스의 본문을 통째로 새로 쓸 때 edit_file보다 안전하다. JS/TS/Python 지원.",
+        "기존 함수/클래스/메서드의 본문을 통째로 새로 쓸 때 edit_file보다 안전하다. JS/TS/Python 지원.",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string", description: "편집할 파일 경로" },
-          target_symbol: { type: "string", description: "교체할 최상위 함수/클래스/const의 이름" },
-          new_body: { type: "string", description: "해당 심볼을 대체할 새 코드 전체(선언부 포함)" },
+          target_symbol: {
+            type: "string",
+            description:
+              "교체할 심볼 이름. 최상위 함수/클래스/const는 이름만(예: 'analyze'). " +
+              "클래스 안의 메서드/프로퍼티는 'Class.method' 형태로 지정(예: 'Parser.parse'). " +
+              "메서드 이름이 파일에서 유일하면 이름만으로도 찾는다.",
+          },
+          new_body: {
+            type: "string",
+            description:
+              "해당 심볼을 대체할 새 코드 전체(선언부 포함). 메서드면 메서드 정의 전체. " +
+              "Python 메서드는 들여쓰기를 생략해도 원본 들여쓰기에 맞춰 재배치된다.",
+          },
         },
         required: ["path", "target_symbol", "new_body"],
       },
@@ -769,7 +780,7 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         else return `오류: patch_ast_node는 JS/TS/Python만 지원한다(확장자 ${ext}).`;
 
         if (!r.ok) {
-          const hint = r.symbols?.length ? ` 파일의 최상위 심볼: ${r.symbols.join(", ")}` : "";
+          const hint = r.symbols?.length ? ` 파일에서 사용 가능한 심볼: ${r.symbols.join(", ")}` : "";
           return `오류: ${r.error}.${hint}`;
         }
         await writeFile(p, r.updated!, "utf-8");

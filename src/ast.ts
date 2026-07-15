@@ -32,7 +32,8 @@ function scriptKind(ts: any, filename: string): any {
   return ts.ScriptKind.TS;
 }
 
-// JS/TS: 최상위 함수/클래스/const 선언에서 targetSymbol을 찾아 newBody로 교체.
+// JS/TS: 최상위 함수/클래스/const + 클래스 멤버(메서드·프로퍼티·접근자·생성자)에서
+// targetSymbol을 찾아 newBody로 교체. 멤버는 'Class.method' 형태로 지정한다.
 export async function patchJsTs(
   filename: string,
   source: string,
@@ -50,28 +51,57 @@ export async function patchJsTs(
     scriptKind(ts, filename)
   );
 
-  const nameOf = (node: any): string | undefined => {
-    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
-      return node.name.text;
-    }
-    if (ts.isVariableStatement(node)) {
-      const d = node.declarationList.declarations[0];
-      if (d && ts.isIdentifier(d.name)) return d.name.text; // export const foo = ...
+  // 클래스 멤버로 취급할 노드 종류(SyntaxKind로 비교 — 타입가드 이름 불확실성 회피)
+  const memberKinds = new Set<number>([
+    ts.SyntaxKind.MethodDeclaration,
+    ts.SyntaxKind.PropertyDeclaration,
+    ts.SyntaxKind.GetAccessor,
+    ts.SyntaxKind.SetAccessor,
+    ts.SyntaxKind.Constructor,
+  ]);
+  const nameText = (name: any): string | undefined => {
+    if (name && (ts.isIdentifier(name) || ts.isPrivateIdentifier(name) || ts.isStringLiteral(name))) {
+      return name.text;
     }
     return undefined;
   };
 
-  const symbols: string[] = [];
-  const hits: { start: number; end: number }[] = [];
+  // 이름 있는 '치환 가능' 노드 수집: 정규화 이름(qname)·기본 이름(bare)·범위·최상위 여부
+  type Hit = { qname: string; bare: string; start: number; end: number; top: boolean };
+  const all: Hit[] = [];
+  const add = (qname: string, bare: string, node: any, top: boolean) =>
+    all.push({ qname, bare, start: node.getStart(sf), end: node.getEnd(), top });
+
   sf.statements.forEach((node: any) => {
-    const n = nameOf(node);
-    if (!n) return;
-    symbols.push(n);
-    if (n === targetSymbol) hits.push({ start: node.getStart(sf), end: node.getEnd() });
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+      const nm = node.name.text;
+      add(nm, nm, node, true);
+      if (ts.isClassDeclaration(node)) {
+        node.members?.forEach((m: any) => {
+          if (!memberKinds.has(m.kind)) return;
+          const mn = m.kind === ts.SyntaxKind.Constructor ? "constructor" : nameText(m.name);
+          if (mn) add(`${nm}.${mn}`, mn, m, false);
+        });
+      }
+    } else if (ts.isVariableStatement(node)) {
+      const d = node.declarationList.declarations[0];
+      if (d && ts.isIdentifier(d.name)) add(d.name.text, d.name.text, node, true); // export const foo = ...
+    }
   });
 
-  if (hits.length === 0) return { ok: false, error: `최상위 심볼 '${targetSymbol}'을 찾지 못함`, symbols };
-  if (hits.length > 1) return { ok: false, error: `심볼 '${targetSymbol}'이 ${hits.length}곳에 있음(모호)`, symbols };
+  const symbols = all.map((h) => h.qname);
+  // 매칭: 점 포함이면 정규화 이름 정확 매칭. 아니면 최상위 우선, 없으면 멤버 기본 이름으로.
+  let hits: Hit[];
+  if (targetSymbol.includes(".")) {
+    hits = all.filter((h) => h.qname === targetSymbol);
+  } else {
+    hits = all.filter((h) => h.top && h.bare === targetSymbol);
+    if (hits.length === 0) hits = all.filter((h) => h.bare === targetSymbol);
+  }
+
+  if (hits.length === 0) return { ok: false, error: `심볼 '${targetSymbol}'을 찾지 못함`, symbols };
+  if (hits.length > 1)
+    return { ok: false, error: `심볼 '${targetSymbol}'이 여러 곳(${hits.length})에 있음(모호) — 'Class.method' 형태로 지정하라`, symbols };
 
   const { start, end } = hits[0];
   const updated = source.slice(0, start) + newBody + source.slice(end);
@@ -88,26 +118,53 @@ try:
 except SyntaxError as e:
     print(json.dumps({"error": "parse: " + str(e)})); sys.exit(0)
 target = sys.argv[2]
-syms = []
-hit = None
-for node in tree.body:
-    name = getattr(node, 'name', None)
-    if name is None and isinstance(node, ast.Assign):
+
+def rng(node):
+    start = node.lineno
+    if getattr(node, 'decorator_list', None):
+        start = min(start, node.decorator_list[0].lineno)
+    return [start, node.end_lineno]
+
+def assign_name(node):
+    if isinstance(node, ast.Assign):
         for t in node.targets:
             if isinstance(t, ast.Name):
-                name = t.id
-    if name is None:
-        continue
-    syms.append(name)
-    if name == target:
-        start = node.lineno
-        if getattr(node, 'decorator_list', None):
-            start = min(start, node.decorator_list[0].lineno)
-        hit = (start, node.end_lineno)
-print(json.dumps({"symbols": syms, "hit": hit}))
+                return t.id
+    return None
+
+syms = []
+tops = []      # (name, rng)
+members = []   # (qname, bare, rng)
+for node in tree.body:
+    name = getattr(node, 'name', None) or assign_name(node)
+    if name is not None:
+        syms.append(name); tops.append((name, rng(node)))
+    if isinstance(node, ast.ClassDef):
+        for m in node.body:
+            mn = getattr(m, 'name', None) or assign_name(m)
+            if mn is None:
+                continue
+            q = node.name + "." + mn
+            syms.append(q); members.append((q, mn, rng(m)))
+
+if '.' in target:
+    hits = [r for (q, b, r) in members if q == target]
+else:
+    hits = [r for (n, r) in tops if n == target]
+    if not hits:
+        hits = [r for (q, b, r) in members if b == target]
+
+out = {"symbols": syms}
+if len(hits) == 1:
+    out["hit"] = hits[0]
+else:
+    out["hit"] = None
+    if len(hits) > 1:
+        out["ambiguous"] = len(hits)
+print(json.dumps(out))
 `;
 
-function runPyLocate(absPath: string, target: string): Promise<{ symbols?: string[]; hit?: [number, number] | null; error?: string } | null> {
+function runPyLocate(absPath: string, target: string): Promise<{ symbols?: string[]; hit?: [number, number] | null; ambiguous?: number; error?: string } | null> {
   return new Promise((res) => {
     const py = process.platform === "win32" ? "python" : "python3";
     let child;
@@ -136,12 +193,22 @@ export async function patchPython(
   const loc = await runPyLocate(absPath, targetSymbol);
   if (!loc) return { ok: false, error: "python 미설치/실행 불가 — AST 편집 불가" };
   if (loc.error) return { ok: false, error: `python 파싱 오류: ${loc.error}` };
+  if (loc.ambiguous)
+    return { ok: false, error: `심볼 '${targetSymbol}'이 여러 곳(${loc.ambiguous})에 있음(모호) — 'Class.method' 형태로 지정하라`, symbols: loc.symbols };
   if (!loc.hit) return { ok: false, error: `심볼 '${targetSymbol}'을 찾지 못함`, symbols: loc.symbols };
 
   const [startLine, endLine] = loc.hit; // 1-based, inclusive
   const lines = source.split("\n");
-  const before = lines.slice(0, startLine - 1);
-  const after = lines.slice(endLine);
-  const updated = [...before, newBody.replace(/\n$/, ""), ...after].join("\n");
+  const origIndent = lines[startLine - 1].match(/^[ \t]*/)?.[0] ?? "";
+  let body = newBody.replace(/\n$/, "");
+  // 파이썬은 들여쓰기가 문법이다. 메서드(원본이 들여써짐)인데 모델이 새 본문을 col 0로 썼으면
+  // 원본 들여쓰기를 입혀 클래스 안에 맞게 재배치한다(모델의 들여쓰기 재현 부담 완화).
+  if (origIndent && !/^[ \t]/.test(body)) {
+    body = body
+      .split("\n")
+      .map((l) => (l.trim() ? origIndent + l : l))
+      .join("\n");
+  }
+  const updated = [...lines.slice(0, startLine - 1), body, ...lines.slice(endLine)].join("\n");
   return { ok: true, updated };
 }
