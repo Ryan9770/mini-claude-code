@@ -19,7 +19,8 @@ const evalDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(evalDir, "..");
 const tasksDir = join(evalDir, "tasks");
 const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-const runsDir = join(evalDir, ".runs", stamp);
+// EVAL_OUT: 결과 디렉터리를 고정 지정(자동 ablation 루프가 두 조건 결과를 정해진 위치에서 읽게).
+const runsDir = process.env.EVAL_OUT ? process.env.EVAL_OUT : join(evalDir, ".runs", stamp);
 
 interface Task {
   name: string;
