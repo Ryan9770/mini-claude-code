@@ -7,6 +7,7 @@ import { buildWithCritic } from "./critic.js";
 import { getSkills, getSkillBody, skillsDir } from "./skills.js";
 import { buildIndex, skillLibDir, getLibrarySkillBody } from "./skill-router.js";
 import { evolve } from "./evolve.js";
+import { runEngine } from "./engine.js";
 import { initMcp, getMcpTools, mcpServerInfo, closeMcp } from "./mcp.js";
 import { rl, beginAbortable, endAbortable, requestAbort } from "./io.js";
 
@@ -74,7 +75,7 @@ async function main() {
   if (mcp.servers) console.log(`  mcp     : ${mcp.servers}개 서버, ${mcp.tools}개 도구`);
 
   console.log(`  모드: /auto(기본) · /agent · /chat  — 현재: ${mode}  (/chat <메시지> = 단발 강제)`);
-  console.log(`  명령: /ralph | /critic | /skills | /evolve | /mcp | exit  (작업 중 Ctrl+C=취소)`);
+  console.log(`  명령: /ralph | /critic | /skills | /evolve | /engine | /mcp | exit  (작업 중 Ctrl+C=취소)`);
   console.log(`  스킬: /<스킬명> [요청]  — 스킬 직접 발동 (예: /ml-experiment 분류 모델 실험)  (/skills=목록)\n`);
 
   while (true) {
@@ -98,6 +99,11 @@ async function main() {
 
       if (input === "/evolve") {
         await evolve();
+        continue;
+      }
+      if (input === "/engine") {
+        // L4 힐 클라이밍: 트레이스에서 반복 실패 패턴을 진단 이슈로 등록(하네스 변경 없음).
+        runEngine();
         continue;
       }
       if (input === "/mcp") {
